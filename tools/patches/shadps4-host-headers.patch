@@ -1,0 +1,37 @@
+diff --git a/src/core/loader/elf.cpp b/src/core/loader/elf.cpp
+index 705cea5..f3925fb 100644
+--- a/src/core/loader/elf.cpp
++++ b/src/core/loader/elf.cpp
+@@ -1,7 +1,7 @@
+ // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
+-#include <fmt/core.h>
++#include <fmt/format.h>
+ #include "common/assert.h"
+ #include "common/logging/log.h"
+ #include "core/file_sys/backends/host_fs.h"
+diff --git a/src/video_core/amdgpu/regs.cpp b/src/video_core/amdgpu/regs.cpp
+index 7454eaf..656cd2a 100644
+--- a/src/video_core/amdgpu/regs.cpp
++++ b/src/video_core/amdgpu/regs.cpp
+@@ -1,6 +1,7 @@
+ // SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <cstring>
+ #include "video_core/amdgpu/regs.h"
+ 
+ namespace AmdGpu {
+diff --git a/src/video_core/amdgpu/resource.h b/src/video_core/amdgpu/resource.h
+index 50c8d47..2ec535f 100644
+--- a/src/video_core/amdgpu/resource.h
++++ b/src/video_core/amdgpu/resource.h
+@@ -3,6 +3,7 @@
+ 
+ #pragma once
+ 
++#include <cstring>
+ #include "common/alignment.h"
+ #include "common/assert.h"
+ #include "common/bit_field.h"

@@ -1,0 +1,36 @@
+{
+  "schema": "skylanders-observed-menu-segments-v1",
+  "limitation": "Short observed menu segments, not a blind boot-to-game macro. Inspect a fresh game frame at each boundary. Input acknowledgments do not prove acceptance.",
+  "segments": [
+    {
+      "name": "arenas-to-exhaust-junction",
+      "precondition": "CHOOSE PLAY is visible, ARENAS is already selected, disposable arena test gate installed.",
+      "operation": "portal_sequence",
+      "arguments": {
+        "intervalMs": 1000,
+        "steps": [
+          { "kind": "button", "name": "cross", "durationMs": 100 },
+          { "kind": "button", "name": "pad_right", "durationMs": 100 },
+          { "kind": "button", "name": "pad_right", "durationMs": 100 },
+          { "kind": "button", "name": "pad_right", "durationMs": 100 }
+        ]
+      },
+      "expectedFrame": "SELECT AN ARENA, Exhaust Junction selected and not locked.",
+      "observed": "2026-10-13, portal-crossfire-01: four separately acknowledged pulses scheduled in one local tool execution at 1 Hz. portal_sequence uses the same native pulse protocol."
+    },
+    {
+      "name": "exhaust-to-first-challenge",
+      "precondition": "Exhaust Junction selected and unlocked.",
+      "operation": "portal_sequence",
+      "arguments": {
+        "intervalMs": 1000,
+        "steps": [
+          { "kind": "button", "name": "cross", "durationMs": 100 },
+          { "kind": "button", "name": "cross", "durationMs": 100 }
+        ]
+      },
+      "expectedFrame": "Loading, then Player 1 character confirmation. Wait for confirmation before sending Cross again.",
+      "observed": "2026-10-13, portal-crossfire-01: first two pulses entered challenge and loading. An extra third pulse during loading was ignored, so it is deliberately omitted here."
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "name": "sky-editor",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Reverse-engineered Skylanders Trap Team level tools and Qt editor",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "format": "node node_modules/prettier/bin/prettier.cjs --write \"tools/*.mjs\" \"tests/**/*.mjs\" \"editor/tests/*.mjs\" package.json",
+    "format:check": "node node_modules/prettier/bin/prettier.cjs --check \"tools/*.mjs\" \"tests/**/*.mjs\" \"editor/tests/*.mjs\" package.json"
+  },
+  "devDependencies": {
+    "prettier": "3.6.2"
+  }
+}

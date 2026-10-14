@@ -1,0 +1,15 @@
+{
+  "format": "skylanders-position-recipe",
+  "version": 1,
+  "name": "Crossfire spawn-layout experiment",
+  "sourceArchive": "level/arena_challenge_303_000.bld",
+  "sourceMember": "level.bld",
+  "sourceSha256": "de0ecd5bc5f5f2b3d99ec81592e8fef97a3228e6777e99f1c169e6cd584e7a32",
+  "description": "Four spawn markers arranged as a square near their original cluster. This is an authored placement experiment using the original arena, not an entirely new level. Floor contact, spawning and navigation must be tested in game. Geometry, scripts, encounter timing, collision and all other objects are unchanged.",
+  "edits": [
+    {"type":"tfbActorInfo","name":"LeftSpawn(1)","position":[-420,1.7504663467407227,-33]},
+    {"type":"tfbActorInfo","name":"LeftSpawn(2)","position":[-416,1.7504663467407227,-33]},
+    {"type":"tfbActorInfo","name":"LeftSpawn(3)","position":[-420,1.7504663467407227,-29]},
+    {"type":"tfbActorInfo","name":"LeftSpawn(4)","position":[-416,1.7504663467407227,-29]}
+  ]
+}

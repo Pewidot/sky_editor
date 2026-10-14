@@ -1,0 +1,374 @@
+diff --git a/src/core/ipc/ipc.cpp b/src/core/ipc/ipc.cpp
+index c29cb93..5ba84d5 100644
+--- a/src/core/ipc/ipc.cpp
++++ b/src/core/ipc/ipc.cpp
+@@ -3,8 +3,10 @@
+ 
+ #include "ipc.h"
+ 
++#include <chrono>
+ #include <iostream>
+ #include <string>
++#include <syncstream>
+ 
+ #include <SDL3/SDL.h>
+ 
+@@ -17,8 +19,10 @@
+ #include "core/emulator_state.h"
+ #include "core/libraries/audio/audioout.h"
+ #include "input/input_handler.h"
++#include "input/ipc_input.h"
+ #include "sdl_window.h"
+ #include "src/core/libraries/usbd/usbd.h"
++#include "video_core/renderdoc.h"
+ #include "video_core/renderer_vulkan/vk_presenter.h"
+ 
+ extern std::unique_ptr<Vulkan::Presenter> presenter;
+@@ -82,6 +86,8 @@ void IPC::Init() {
+     std::cerr << ";#IPC_ENABLED\n";
+     std::cerr << ";ENABLE_MEMORY_PATCH\n";
+     std::cerr << ";ENABLE_EMU_CONTROL\n";
++    std::cerr << ";ENABLE_INPUT_PULSE_V1\n";
++    std::cerr << ";ENABLE_CAPTURE_GAME_FRAME_V1\n";
+     std::cerr << ";#IPC_END\n";
+     std::cerr.flush();
+ 
+@@ -106,7 +112,7 @@ void IPC::InputLoop() {
+         static std::string line_buffer;
+         do {
+             std::getline(std::cin, line_buffer, '\n');
+-        } while (!line_buffer.empty() && line_buffer.back() == '\\');
++        } while (std::cin && !line_buffer.empty() && line_buffer.back() == '\\');
+         return line_buffer;
+     };
+     auto next_u64 = [&] -> u64 {
+@@ -116,6 +122,12 @@ void IPC::InputLoop() {
+ 
+     while (true) {
+         auto& cmd = next_str();
++        if (!std::cin) {
++            SDL_Event event{};
++            event.type = SDL_EVENT_QUIT;
++            SDL_PushEvent(&event);
++            return;
++        }
+         if (cmd.empty()) {
+             continue;
+         }
+@@ -137,6 +149,34 @@ void IPC::InputLoop() {
+                 .maskOffset = static_cast<int>(next_u64()),
+             };
+             MemoryPatcher::AddPatchToQueue(entry);
++        } else if (cmd == "INPUT_PULSE") {
++            // Copy each line: next_str() reuses one internal string buffer.
++            const std::string id = next_str(), kind = next_str(), name = next_str(),
++                              duration = next_str();
++            std::string error;
++            const auto pulse = InputIPC::Parse(id, kind, name, duration, error);
++            if (!pulse || !InputIPC::Queue(*pulse)) {
++                unsigned parsed_id{};
++                if (!InputIPC::Decimal(id, parsed_id) || parsed_id > 0x7fffffffU)
++                    parsed_id = 0;
++                std::osyncstream(std::cerr)
++                    << ";INPUT_PULSE " << parsed_id << " error "
++                    << (pulse ? "SDL event queue unavailable" : error) << '\n';
++            }
++        } else if (cmd == "CAPTURE_GAME_FRAME") {
++            unsigned id{};
++            const bool valid = InputIPC::Decimal(next_str(), id) && id > 0 && id <= 0x7fffffffU;
++            static std::chrono::steady_clock::time_point previous;
++            const auto now = std::chrono::steady_clock::now();
++            if (!valid || !(SDL_WasInit(SDL_INIT_EVENTS) & SDL_INIT_EVENTS) ||
++                now - previous < std::chrono::milliseconds(250)) {
++                std::osyncstream(std::cerr) << ";CAPTURE_GAME_FRAME " << (valid ? id : 0)
++                                            << " error invalid_id_not_ready_or_rate_limit\n";
++            } else {
++                previous = now;
++                VideoCore::RequestScreenshot(VideoCore::ScreenshotRequest::GameOnly);
++                std::osyncstream(std::cerr) << ";CAPTURE_GAME_FRAME " << id << " queued\n";
++            }
+         } else if (cmd == "PAUSE") {
+             DebugState.PauseGuestThreads();
+         } else if (cmd == "RESUME") {
+diff --git a/src/core/ipc/ipc.h b/src/core/ipc/ipc.h
+index 933afa8..1c5cb95 100644
+--- a/src/core/ipc/ipc.h
++++ b/src/core/ipc/ipc.h
+@@ -39,5 +39,5 @@ public:
+     void SendRestart(const std::vector<std::string>& args);
+ 
+ private:
+-    [[noreturn]] void InputLoop();
++    void InputLoop();
+ };
+diff --git a/src/input/ipc_input.h b/src/input/ipc_input.h
+new file mode 100644
+index 0000000..b301acc
+--- /dev/null
++++ b/src/input/ipc_input.h
+@@ -0,0 +1,191 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++// Local, opt-in stdin IPC extension. Events never leave this SDL process.
++#pragma once
++
++#include <array>
++#include <charconv>
++#include <cstdint>
++#include <functional>
++#include <map>
++#include <optional>
++#include <string>
++#include <string_view>
++#include <SDL3/SDL.h>
++
++namespace InputIPC {
++enum class Kind : unsigned { Key, Button, Axis };
++struct Pulse {
++    int id{};
++    Kind kind{};
++    Uint32 code{};
++    Sint8 value{};
++    Uint32 duration{};
++};
++inline bool Decimal(std::string_view text, unsigned& result) {
++    const auto parsed = std::from_chars(text.data(), text.data() + text.size(), result);
++    return !text.empty() && parsed.ec == std::errc{} && parsed.ptr == text.data() + text.size();
++}
++inline std::optional<Pulse> Parse(std::string_view request, std::string_view kind,
++                                  std::string_view name, std::string_view duration,
++                                  std::string& error) {
++    unsigned id{}, milliseconds{};
++    if (!Decimal(request, id) || id == 0 || id > 0x7fffffffU || !Decimal(duration, milliseconds) ||
++        milliseconds < 10 || milliseconds > 2000) {
++        error = "id must be 1..2147483647; duration must be 10..2000 decimal ms";
++        return {};
++    }
++    Pulse pulse{static_cast<int>(id), Kind::Key, 0, 0, milliseconds};
++    if (name.empty() || name.size() > 32 || kind.size() > 8) {
++        error = "input name/kind is too long or empty";
++        return {};
++    }
++    if (kind == "key") {
++        const std::string key(name == "enter" ? "Return" : name);
++        pulse.code = SDL_GetKeyFromName(key.c_str());
++        if (pulse.code != SDLK_UNKNOWN)
++            return pulse;
++    } else if (kind == "button") {
++        pulse.kind = Kind::Button;
++        constexpr std::array buttons{std::pair{"cross", SDL_GAMEPAD_BUTTON_SOUTH},
++                                     std::pair{"circle", SDL_GAMEPAD_BUTTON_EAST},
++                                     std::pair{"square", SDL_GAMEPAD_BUTTON_WEST},
++                                     std::pair{"triangle", SDL_GAMEPAD_BUTTON_NORTH},
++                                     std::pair{"options", SDL_GAMEPAD_BUTTON_START},
++                                     std::pair{"share", SDL_GAMEPAD_BUTTON_BACK},
++                                     std::pair{"l1", SDL_GAMEPAD_BUTTON_LEFT_SHOULDER},
++                                     std::pair{"r1", SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER},
++                                     std::pair{"l3", SDL_GAMEPAD_BUTTON_LEFT_STICK},
++                                     std::pair{"r3", SDL_GAMEPAD_BUTTON_RIGHT_STICK},
++                                     std::pair{"pad_up", SDL_GAMEPAD_BUTTON_DPAD_UP},
++                                     std::pair{"pad_down", SDL_GAMEPAD_BUTTON_DPAD_DOWN},
++                                     std::pair{"pad_left", SDL_GAMEPAD_BUTTON_DPAD_LEFT},
++                                     std::pair{"pad_right", SDL_GAMEPAD_BUTTON_DPAD_RIGHT}};
++        for (const auto& [label, code] : buttons)
++            if (name == label) {
++                pulse.code = code;
++                return pulse;
++            }
++    } else if (kind == "axis") {
++        pulse.kind = Kind::Axis;
++        struct NamedAxis {
++            std::string_view name;
++            SDL_GamepadAxis code;
++            Sint8 value;
++        };
++        constexpr std::array axes{NamedAxis{"left_x_minus", SDL_GAMEPAD_AXIS_LEFTX, -127},
++                                  NamedAxis{"left_x_plus", SDL_GAMEPAD_AXIS_LEFTX, 127},
++                                  NamedAxis{"left_y_minus", SDL_GAMEPAD_AXIS_LEFTY, -127},
++                                  NamedAxis{"left_y_plus", SDL_GAMEPAD_AXIS_LEFTY, 127},
++                                  NamedAxis{"right_x_minus", SDL_GAMEPAD_AXIS_RIGHTX, -127},
++                                  NamedAxis{"right_x_plus", SDL_GAMEPAD_AXIS_RIGHTX, 127},
++                                  NamedAxis{"right_y_minus", SDL_GAMEPAD_AXIS_RIGHTY, -127},
++                                  NamedAxis{"right_y_plus", SDL_GAMEPAD_AXIS_RIGHTY, 127},
++                                  NamedAxis{"l2", SDL_GAMEPAD_AXIS_LEFT_TRIGGER, 127},
++                                  NamedAxis{"r2", SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, 127}};
++        for (const auto& axis : axes)
++            if (name == axis.name) {
++                pulse.code = axis.code;
++                pulse.value = axis.value;
++                return pulse;
++            }
++    }
++    error = "unknown named input";
++    return {};
++}
++inline Uint32 EventType() {
++    // The pinned frontend reserves USER+1..USER+15 with literal constants,
++    // without registering them. Leave that range clear before our two events.
++    static const Uint32 type = [] {
++        const auto base = SDL_RegisterEvents(18);
++        return base ? base + 16 : 0;
++    }();
++    return type;
++}
++inline bool Queue(const Pulse& pulse) {
++    if (!(SDL_WasInit(SDL_INIT_EVENTS) & SDL_INIT_EVENTS) || EventType() == 0)
++        return false;
++    SDL_Event event{};
++    event.type = EventType();
++    event.user.code = pulse.id;
++    // Opaque integer payloads, never dereferenced. Supported emulator targets
++    // are 64-bit; no allocation or cross-thread ownership is required.
++    static_assert(sizeof(uintptr_t) >= 8);
++    const uintptr_t packed = uintptr_t(pulse.code) | (uintptr_t(pulse.kind) << 32) |
++                             (uintptr_t(static_cast<Uint8>(pulse.value)) << 40);
++    event.user.data1 = reinterpret_cast<void*>(packed);
++    event.user.data2 = reinterpret_cast<void*>(uintptr_t(pulse.duration));
++    return SDL_PushEvent(&event);
++}
++class Manager {
++    struct Active {
++        Pulse pulse;
++        SDL_TimerID timer;
++    };
++    std::map<int, Active> active;
++    int last_id{};
++    static Uint32 SDLCALL ReleaseTimer(void* userdata, SDL_TimerID, Uint32) {
++        SDL_Event event{};
++        event.type = EventType() + 1;
++        event.user.code = static_cast<int>(reinterpret_cast<uintptr_t>(userdata));
++        // If the SDL queue is temporarily full, retry instead of losing a key-up.
++        return SDL_PushEvent(&event) ? 0 : 10;
++    }
++
++public:
++    using Apply = std::function<void(const Pulse&, bool)>;
++    using Acknowledge = std::function<void(int, std::string_view)>;
++    ~Manager() {
++        for (const auto& [id, item] : active)
++            SDL_RemoveTimer(item.timer);
++    }
++    bool Process(const SDL_Event& event, const Apply& apply, const Acknowledge& ack) {
++        if (event.type != EventType() && event.type != EventType() + 1)
++            return false;
++        const int id = event.user.code;
++        if (event.type == EventType() + 1) {
++            const auto found = active.find(id);
++            if (found != active.end()) {
++                SDL_RemoveTimer(found->second.timer);
++                apply(found->second.pulse, false);
++                active.erase(found);
++                ack(id, "released");
++            }
++            return true;
++        }
++        const auto packed = reinterpret_cast<uintptr_t>(event.user.data1);
++        Pulse pulse{id, static_cast<Kind>((packed >> 32) & 255), static_cast<Uint32>(packed),
++                    static_cast<Sint8>((packed >> 40) & 255),
++                    static_cast<Uint32>(reinterpret_cast<uintptr_t>(event.user.data2))};
++        if (id <= last_id || active.size() >= 16) {
++            ack(id, "error_duplicate_id_or_busy");
++            return true;
++        }
++        for (const auto& [other_id, item] : active) {
++            if (item.pulse.kind == pulse.kind && item.pulse.code == pulse.code) {
++                ack(id, "error_input_already_held");
++                return true;
++            }
++        }
++        last_id = id;
++        apply(pulse, true);
++        const auto timer =
++            SDL_AddTimer(pulse.duration, ReleaseTimer, reinterpret_cast<void*>(uintptr_t(id)));
++        if (!timer) {
++            apply(pulse, false);
++            ack(id, "error_timer_released");
++            return true;
++        }
++        active.emplace(id, Active{pulse, timer});
++        ack(id, "pressed");
++        return true;
++    }
++    void ReleaseAll(const Apply& apply, const Acknowledge& ack) {
++        for (const auto& [id, item] : active) {
++            SDL_RemoveTimer(item.timer);
++            apply(item.pulse, false);
++            ack(id, "cancelled_released");
++        }
++        active.clear();
++    }
++};
++} // namespace InputIPC
+diff --git a/src/sdl_window.cpp b/src/sdl_window.cpp
+index a7d3650..80bb473 100644
+--- a/src/sdl_window.cpp
++++ b/src/sdl_window.cpp
+@@ -1,6 +1,8 @@
+ // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <iostream>
++#include <syncstream>
+ #include <SDL3/SDL_events.h>
+ #include <SDL3/SDL_hints.h>
+ #include <SDL3/SDL_init.h>
+@@ -190,7 +192,20 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, Input::GameControllers* controller
+     }
+ }
+ 
+-WindowSDL::~WindowSDL() = default;
++static void ApplyIPCInput(const InputIPC::Pulse& pulse, bool down) {
++    const auto type = pulse.kind == InputIPC::Kind::Key      ? Input::InputType::KeyboardMouse
++                      : pulse.kind == InputIPC::Kind::Button ? Input::InputType::Controller
++                                                             : Input::InputType::Axis;
++    const Input::InputEvent input({type, pulse.code, 1}, down, down ? pulse.value : 0);
++    if (Input::UpdatePressedKeys(input))
++        Input::ActivateOutputsFromInputs();
++}
++static void AcknowledgeIPCInput(int id, std::string_view state) {
++    std::osyncstream(std::cerr) << ";INPUT_PULSE " << id << ' ' << state << '\n';
++}
++WindowSDL::~WindowSDL() {
++    ipc_inputs.ReleaseAll(ApplyIPCInput, AcknowledgeIPCInput);
++}
+ 
+ void WindowSDL::SetIcon(std::span<const u8> png_data) {
+     if (png_data.empty()) {
+@@ -208,6 +223,10 @@ void WindowSDL::WaitEvent() {
+     if (!SDL_WaitEvent(&event)) {
+         return;
+     }
++    // Main-thread input mutation, independent of host focus or desktop events.
++    // Timers start when the press is applied, not when IPC queued the request.
++    if (ipc_inputs.Process(event, ApplyIPCInput, AcknowledgeIPCInput))
++        return;
+ 
+     if (Libraries::Mouse::PushSDLEvent(event) || Libraries::Keyboard::PushSDLEvent(event)) {
+         return;
+@@ -252,6 +271,7 @@ void WindowSDL::WaitEvent() {
+         OnGamepadEvent(&event);
+         break;
+     case SDL_EVENT_QUIT:
++        ipc_inputs.ReleaseAll(ApplyIPCInput, AcknowledgeIPCInput);
+         is_open = false;
+         break;
+     case SDL_EVENT_QUIT_DIALOG:
+diff --git a/src/sdl_window.h b/src/sdl_window.h
+index 5f82bf6..6fba288 100644
+--- a/src/sdl_window.h
++++ b/src/sdl_window.h
+@@ -9,6 +9,7 @@
+ #include "common/types.h"
+ #include "core/libraries/pad/pad.h"
+ #include "input/controller.h"
++#include "input/ipc_input.h"
+ 
+ struct SDL_Window;
+ struct SDL_Gamepad;
+@@ -93,6 +94,7 @@ private:
+     SDL_Window* window{};
+     bool is_shown{};
+     bool is_open{true};
++    InputIPC::Manager ipc_inputs;
+ };
+ 
+ void SetWindowIcon(SDL_Window* window, const std::vector<u8>& png);
