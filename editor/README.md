@@ -2,7 +2,18 @@
 
 This Qt 6 desktop application opens an **extracted inner `level.bld` IGZ payload** in an interactive 3D placement editor and exposes its file operations through an MCP stdio server. The viewport draws decoded map triangles with perspective, depth buffering, camera navigation, actor picking, and XYZ move gizmos. Verified static actor models are shown when available; unsupported world-positioned actors use selectable, fixed-world-size editor symbols. Triggers and other logic markers remain boxes; name-classified visible objects can use character, chest, crate or gate placeholders. These are not original model dimensions or collision bounds. Position edits export through `tools/level_builder.mjs` into a new file plus a provenance manifest.
 
-The current scope is existing-object placement plus a read-only preview of verified actor collision boxes. Static map meshes can be inspected but are read-only. New brushes/meshes, collision authoring in the GUI, object allocation, scripts, textures/material editing, and registration of additional level slots remain separate tasks. Only backend-verified position fields can be changed here. A successful static build does not establish that the game or shadPS4 can load the result.
+Original chapters support verified actor placement and collision inspection;
+their static meshes remain read-only. Authored workshops additionally support
+static GLB import, XYZ rotation/scale and automatically generated box collision.
+Play compiles supported workshops into a private native game copy. This does
+not add arbitrary models to original chapters or generate general mission logic.
+See [model import](../docs/MODEL_IMPORT.md) for format and collision limitations.
+
+Editor and Live share a docked workspace, either tabbed or side by side.
+[Play configuration](../docs/GAME_PREVIEW.md) describes the saved profile,
+on-demand preparation, Stop, embedded native view and persistent freecam.
+`--play /path/to/map.scene.json` starts Play after the document loads; it still
+requires a locally prepared emulator/game/checkpoint profile.
 
 ## Build
 
@@ -32,7 +43,22 @@ node editor/tests/real_integration.mjs \
   /absolute/path/to/arena_challenge_303_000/level.bld
 ```
 
-The output file and manifest are retained in a new temporary directory printed by the test. They contain your local game data and should not be distributed. The six default CTests require no game files or emulator; enabling GPU tests adds a seventh, which needs a working display/driver.
+The output file and manifest are retained in a new temporary directory printed by the test. They contain your local game data and should not be distributed. Default CTests require no game files or emulator. Optional GPU and X11-host tests need a working display/driver.
+
+Open directly at a repeatable desktop camera (applied after asynchronous scene
+loading, without changing the level):
+
+```bash
+editor/build/skylanders-level-editor --renderer gpu \
+  --camera-json '{"pivot":[-423,100,-73],"yawRadians":-0.4,"pitchRadians":-0.85,"distance":64}' \
+  /absolute/path/to/sunbreak-build/level.bld
+```
+
+These coordinates frame the Sunbreak recipe. Other levels need their own
+camera. The same `--camera-json` works with `--render-scene`; it is not an MCP
+server startup option. The GUI workflow test verifies the camera survives the
+asynchronous load. `--smoke-test` is a brief empty-window startup test, not a
+wait-until-loaded test for an input file.
 
 Read-only verification of the real 3D scene through MCP, including vertex/index and texture-enabled responses, RGBA hashes, deduplication, and transport budgets:
 
@@ -278,6 +304,44 @@ inspect the resulting frame, and choose the next action from what is visible.
 A checkpoint is **not an emulator RAM savestate**: resume boots the game and uses whatever progress the game actually saved. Exact mid-frame positions, uncommitted progress, and automatic intro skipping are not promised by this GUI. Choose a non-temporary checkpoint destination if you want to keep it across system cleanup. Session logs and private writable figures remain in the session directory; nothing is overwritten or deleted by the dialog.
 
 The portal runs through its own persistent controller and separate MCP interface described in [PORTAL.md](../docs/PORTAL.md). The C++ `--mcp` server below exposes level-file operations only; it does not drive an open portal dialog or share its emulator session.
+
+### Detached native camera window
+
+**Play** launches the current supported map into the main window's **Live**
+viewport using a saved profile. Editor/Live can be tabbed or side by side;
+portal controls and settings are side panels, not automatic popups. The live
+pane hosts the owned SDL/Vulkan X11 window directly. Its explicit PNG fallback
+is still snapshots, with at least one second after each completed capture.
+See [one-click setup and workspace controls](../docs/GAME_PREVIEW.md).
+
+After a map loads, **Free camera** enables the experimental exact-build
+camera until disabled. Click the viewport, then use **WASD**, **Q/E** down/up, and **right-mouse drag**
+to look. The focused view coalesces mouse changes and held keys into one bounded
+request at a time; it does not inject keys into the desktop or emulator window.
+**Esc** or toggling Free camera off restores normal control. Closing the
+view, heartbeat expiry and stopping the owned emulator also restore it. The game
+continues simulating while the camera is held.
+
+**Hide HUD** temporarily controls the native sprite pass, including HUD
+and potentially menus/prompts. It restores the original flag with the camera.
+The camera retains native projection and has no distance tether or collision
+avoidance. **Speed** sets 0.1–100 game units per second and is remembered between
+sessions. Native coordinate units are not calibrated as metres. Moving the
+camera does not force distant regions to load. Only the exact
+source-pinned game/emulator pair is accepted. See the [supported local launch
+configuration and safety details](../docs/PORTAL.md#native-game-view-and-experimental-free-camera).
+
+Automatic snapshots have a 30-image batch budget. Once the camera is restored
+and requests are idle, **New capture batch** explicitly authorizes another batch
+without restarting the emulator or deleting earlier PNGs. Reopening the window
+alone never resets the budget. Manual captures remain explicit one-shot actions.
+
+The separate portal MCP server provides `portal_camera_enable`,
+`portal_camera_move`, `portal_camera_ui`, `portal_camera_disable`, and
+`portal_camera_status`. These operate on that server's own child, not an emulator
+owned by another editor or process. For repeatable checks, the normal test suite
+uses synthetic fixtures; `editor-nativecamera-live` is a separately opt-in test
+target and is never launched by CTest.
 
 ## MCP integration
 

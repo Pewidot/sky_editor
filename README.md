@@ -22,12 +22,18 @@ third-party vehicle model is included. You must supply your own local files.
 - Export edits to new files with source hashes and manifests, then rebuild an archive.
   The tools preserve originals and reject incompatible inputs.
 - Use the same inspection and editing backend through MCP.
-- Preview authored scenes, including the optional private-model
-  [Gallardo grid demo](docs/GALLARDO_DEMO.md).
+- Import static GLB models into authored workshops, with rotation, scale and
+  a bounding-box collider per imported root. Supported workshops export native
+  geometry and textures for the game. See [model import](docs/MODEL_IMPORT.md).
+- Start a supported current map with **Play**, using a saved local profile and
+  an on-demand private build. Preparation stages and **Stop** appear in Live.
+- Keep Editor and the native emulator view in one docked window. The native
+  freecam has adjustable speed, right-button mouse look and a renewable hold.
 
-This is still an experimental editor. Native static-map authoring, a complete
-script compiler, animation, exact game shading and fully playable new chapters
-are **not finished**. Unsupported actors are labelled proxies; the lighting rig
+This is still an experimental editor. Import into arbitrary original chapters,
+a complete script compiler, animation and exact editor/game shading parity
+are **not finished**. Imported collision is a solid box, not a mesh collider.
+Unsupported actors are labelled proxies; the lighting rig
 is a preview, not a reconstruction of every in-game light. Chapter-registration
 and save-migration tools are research utilities, not a one-click chapter installer.
 See [current status](docs/WORK_STATUS.md) for the tested boundaries.
@@ -37,6 +43,8 @@ See [current status](docs/WORK_STATUS.md) for the tested boundaries.
 Requirements: C++17, CMake 3.21+, Qt 6.2+ (Core, Widgets, OpenGL), liblzma development
 headers and Node.js 24+ for the complete toolset and tests. Linux is the tested
 host. The runtime JavaScript tools have no npm dependencies.
+GLB texture import also requires ImageMagick (`magick`). Native live embedding
+uses `xcb` and `xcb-shape` development libraries and an X11/XWayland display.
 
 ```bash
 cmake -S editor -B editor/build -DCMAKE_BUILD_TYPE=Release
@@ -75,6 +83,19 @@ Use **Build edited copy** to export to a new filename. Static map geometry is
 read-only; triggers remain fixed-world-size boxes. `--renderer cpu` selects the
 software fallback.
 
+For an authored workshop, use **Import GLB…** and choose a new `.scene.json`
+destination. Select the model, edit position/rotation/scale and use **Apply
+transform**. With a prepared [preview profile](docs/GAME_PREVIEW.md), click
+**Play**, or launch directly:
+
+```bash
+./editor/build/skylanders-level-editor --renderer gpu --play /path/to/workshop.scene.json
+```
+
+The profile must identify your own emulator, prepared game and compatible
+checkpoint. These are not bundled or downloaded; importing a GLB alone does
+not register a new chapter in an unmodified game.
+
 ## MCP
 
 ```bash
@@ -84,7 +105,8 @@ software fallback.
 
 The server communicates over stdio and shares the desktop editor's file backend,
 not its live pending edits. It supports inspection, object listing, material
-diagnostics, captures and copy builds. See [editor documentation](editor/README.md#mcp-integration)
+diagnostics, captures, GLB import and copy builds with authored transforms.
+See [editor documentation](editor/README.md#mcp-integration)
 for client configuration and arguments. REA is a separate investigation tool;
 it is not required to use the editor. The optional
 [portal controller](docs/PORTAL.md) runs isolated shadPS4 test sessions.
@@ -95,6 +117,8 @@ it is not required to use the editor. The optional
 | --- | --- |
 | Local game setup and dependencies | [Setup](docs/SETUP.md) |
 | Viewport, controls and MCP | [Editor](editor/README.md) |
+| Native live view and current-map Play | [Preview setup](docs/GAME_PREVIEW.md), [fast-start evidence](docs/FAST_PREVIEW.md) |
+| Static models and collision | [GLB import](docs/MODEL_IMPORT.md) |
 | Research method and evidence | [Reverse engineering](docs/REVERSE_ENGINEERING.md) |
 | Archives and object layout | [Level format](docs/LEVEL_FORMAT.md), [IGZ reader](tools/IGZ_READER.md), [archive repacking](docs/ARCHIVE_REPACK.md) |
 | Rendering | [GPU renderer](docs/GPU_RENDERER.md), [material diagnostics](docs/MATERIAL_DIAGNOSTICS.md), [lighting catalog](docs/LIGHTING_CATALOG.md) |

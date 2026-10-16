@@ -35,6 +35,38 @@ function seal(buffer) {
   return buffer;
 }
 const save = (bytes) => seal(Buffer.alloc(bytes + 4));
+test('explicit field-specific element remapping inserts a chapter without moving difficulty slots', () => {
+  const oldSchema = schema(8, [field('progress', 1, 5, 4), field('difficulty', 21, 4, 4)]);
+  const newSchema = schema(8, [field('progress', 1, 5, 5), field('difficulty', 26, 4, 5)]);
+  const source = save(8);
+  for (let i = 0; i < 4; i++) {
+    writeRaw(source, 1 + i * 5, 5, 10 + i);
+    writeRaw(source, 21 + i * 4, 4, 5 + i);
+  }
+  seal(source);
+  const expectedSha256 = sha(source),
+    elementMaps = { progress: [0, 1, 3, 4] };
+  const result = migrateSaveLayout({ source, expectedSha256, oldSchema, newSchema, elementMaps });
+  assert.deepEqual(
+    Array.from({ length: 5 }, (_, i) => readRaw(result.buffer, 1 + i * 5, 5)),
+    [10n, 11n, 0n, 12n, 13n],
+  );
+  assert.deepEqual(
+    Array.from({ length: 5 }, (_, i) => readRaw(result.buffer, 26 + i * 4, 4)),
+    [5n, 6n, 7n, 8n, 0n],
+  );
+  assert.deepEqual(result.manifest.fields[0].zeroInitialized.destinationElements, [2]);
+  assert.equal(sha(source), expectedSha256);
+  for (const invalid of [
+    { progress: [0, 1, 1, 3] },
+    { progress: [0, 1, 2] },
+    { progress: [0, 1, 2, 5] },
+    { missing: [0] },
+  ])
+    assert.throws(() =>
+      migrateSaveLayout({ source, expectedSha256, oldSchema, newSchema, elementMaps: invalid }),
+    );
+});
 function migrate(source, oldSchema, newSchema) {
   return migrateSaveLayout({ source, expectedSha256: sha(source), oldSchema, newSchema });
 }

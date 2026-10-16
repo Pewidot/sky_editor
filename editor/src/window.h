@@ -7,6 +7,8 @@
 #include <QPointer>
 
 class QComboBox;
+class QAction;
+class QDockWidget;
 class QCheckBox;
 class QDoubleSpinBox;
 class QLabel;
@@ -17,11 +19,14 @@ class QTableWidget;
 class QCloseEvent;
 class SceneView;
 class PortalDialog;
+class PreviewSettingsPanel;
 
 class EditorWindow : public QMainWindow {
   public:
     explicit EditorWindow(BackendConfig config);
+    bool setInitialCamera(const QJsonObject &camera);
     void openPath(const QString &path, const QString &geometryPath = {});
+    void playWhenLoaded() { autoPlay_ = true; }
 
   protected:
     void closeEvent(QCloseEvent *event) override;
@@ -36,7 +41,14 @@ class EditorWindow : public QMainWindow {
     QMap<qint64, QJsonObject> collisions_;
     QString collisionState_ = "Collision data has not been inspected.";
     QJsonObject selectedObject_;
+    QJsonObject initialCamera_;
     QMap<qint64, QJsonArray> edits_;
+    QMap<qint64, QJsonObject> transforms_;
+    bool transformChanged_ = false;
+    bool cancelPreview_ = false;
+    bool autoPlay_ = false;
+    QDoubleSpinBox *rotations_[3], *scales_[3];
+    QPushButton *stopPreview_;
     int offset_ = 0;
     int nextOffset_ = -1;
     bool busy_ = false;
@@ -67,6 +79,15 @@ class EditorWindow : public QMainWindow {
     QPushButton *undo_;
     QPushButton *clear_;
     QPushButton *build_;
+    QPushButton *play_;
+    QAction *previewSettings_;
+    QLabel *previewStatus_;
+    QDockWidget *previewSettingsDock_;
+    QDockWidget *editorDock_;
+    QMainWindow *workspace_;
+    QDockWidget *liveDock_;
+    QDockWidget *portalDock_;
+    PreviewSettingsPanel *previewSettingsPanel_;
 
     void setBusy(bool busy);
     void log(const QString &text);
@@ -82,5 +103,13 @@ class EditorWindow : public QMainWindow {
     void openMaterialPreview(const QJsonObject &source, const QJsonObject &record);
     QWidget *createLightingPanel();
     void buildCopy();
+    void playCurrentMap();
+    void stopPreview();
+    void showPreparation(const QString &stage);
+    void importGlb();
+    void configurePreview();
+    void ensurePortal();
+    void clearLiveView();
+    void previewError(const QString &message);
     bool canDiscard();
 };

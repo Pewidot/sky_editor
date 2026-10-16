@@ -1,5 +1,10 @@
 # Independent demo chapter: load path and remaining contracts
 
+Update2026-10-14: [NATIVE_DEMO.md](NATIVE_DEMO.md) records the now-playable
+Gallardo grid sandbox and its build/start procedure. The plans below explain the
+reverse-engineered contracts; earlier shell-only observations are historical.
+Arbitrary mission scripting and a completion/reward flow remain unfinished.
+
 This is a source-bound plan for `Level_900_AIWorkshop`, not a claim that a
 renamed archive or editor scene is playable. Static findings below use the
 supported CUSA00697 ELF and owned files. No original archive or save was changed
@@ -33,12 +38,17 @@ and `ev_b4359ed1f0841a303482c71d1837a3883f6674b530ccbaf0958f1f2e05657768`.
 The original file bytes at virtual `0xce2530` are `:/\0`; this is an archive
 mount path, not a loose filesystem subdirectory.
 
-The direct bridge from the script `Change Level` reference to that native
-function and the producer of the `level/` prefix still require focused caller
-evidence. Therefore `level/level_900_aiworkshop.bld` is the expected candidate,
-not yet a captured successful open. The native archive route is not a hardcoded
-list of the 22 chapter names, but that does not prove every new name is accepted
-by the higher-level script/state machinery.
+Native `0x401540` supplies `level/` when the requested string has no slash;
+`0x402310` polls the pending native request and dispatches through `0x401770`.
+Evidence `ev_a3faf4b578ad97dde2249e53cdd161ad6163bd7cf92d4e4ab63638ac7982369c`
+and `ev_d1757a4e49f110c6c271f10bfb1373aaa23f7dd0eca1b712bb6b5560c0e58ad4`
+is retained in bundle v10. The exact script-reference-to-native-pending-request
+assignment remains untraced; the overall route now has operational evidence:
+`builds/runtime-chapter-ui-02/emulator.log` line2093 opens
+`/app0/level/level_900_aiworkshop.bld`. The chapter-select entry loaded an intact
+Arena303 shell at that independent name, spawned Food Fight, allowed movement,
+and returned through chapter select into Soda Springs. This establishes loading
+and unloading of this shell, not a completed Gallardo chapter.
 
 `.arc` is not universally mandatory: the existing `arena_mesh_303.bld` has no
 sibling `.arc` in this owned extraction. Its archive has only one member,
@@ -113,6 +123,16 @@ game needs no navigation: the challenge also contains actor waypoint fields
 and named ramp smart-path actors. Enemy pathing remains a separate contract.
 
 ## Construction order and acceptance
+
+Runtime identity finding: the new story is adventure ID18, while its appended
+title/load pair remains index22. Existing expansion IDs18..21 become19..22.
+Descriptions must therefore insert at18, not append. Four initializer villain
+index operands and UI expansion/display thresholds must change in coordination.
+Seven save arrays use adventure order and require explicit element remapping;
+difficulty tracking retains its original pre-order segment offsets, with the
+new chapter at66..68. The first layout-only migration did not preserve this
+semantic identity and must not be used as a compatibility example. The corrected
+candidate is `builds/checkpoint-chapter23-identity-01`; see WORK_STATUS.
 
 1. Finish the UI extension and explicit backdrop policy, without changing
    existing chapter identities or silently shifting localized strings.

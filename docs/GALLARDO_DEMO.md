@@ -1,8 +1,10 @@
 # Gallardo grid demonstration
 
-This is an **editable, hardware-rendered scene preview**, not yet a playable
-PS4 chapter. The separate registration/UI/runtime work is recorded in
-[WORK_STATUS.md](WORK_STATUS.md). Do not put `.scene.json` into the game archive.
+The editable, hardware-rendered scene preview now also has a separately built
+**native playable sandbox chapter**. See [NATIVE_DEMO.md](NATIVE_DEMO.md) for
+the tested game build, startup command and exact-source rebuild procedure.
+Do not put `.scene.json` into the game archive: the native builder converts
+geometry, texture buffers and placement activation into the game's format.
 
 ## Reproduce from your own model
 
@@ -60,9 +62,10 @@ as an **authored assembly correction**, retaining the original matrix and
 correction per instance. This is not proof of BeamNG's generic flexbody placement
 semantics. No vehicle scripts, deformation, suspension or driving are simulated.
 
-Paint is the selected configuration's color swatch. PBR layering, reflections,
-transparent glass blending, shadow casting and native Skylanders light activation
-are not reproduced. Missing source assets remain listed in `provenance`.
+Paint is the selected configuration's color swatch. PBR layering, reflections
+and transparent glass blending are not reproduced. The editor preview does not
+reconstruct native light activation/shadow behavior; the separate native chapter
+retains the game's outdoor light/sky rig. Missing source assets remain in `provenance`.
 The car is a decorative model, not a drivable gameplay vehicle.
 
 ## Render verification

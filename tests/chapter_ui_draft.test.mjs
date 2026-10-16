@@ -32,7 +32,9 @@ test(
     assert.equal(result.manifest.languages.length, 10);
     assert.equal(result.manifest.runtimeValidated, false);
     assert.equal(result.manifest.buttonCount, 23);
-    assert.equal(z.u32(z.objects.find((o) => o.encoded === 296400).offset + 64), 22);
+    assert.equal(z.u32(z.objects.find((o) => o.encoded === 296400).offset + 64), 23);
+    assert.equal(z.u32(z.objects.find((o) => o.encoded === 209920).offset + 64), 18);
+    assert.equal(result.manifest.descriptionAdventureId, 18);
     assert.equal(createHash('sha256').update(ui).digest('hex'), hash);
   },
 );

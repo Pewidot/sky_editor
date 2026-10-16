@@ -40,6 +40,10 @@ int main(int argc, char **argv) {
     const auto initialHash = capture ? fileHash(QString::fromLocal8Bit(argv[3])) : QByteArray{};
     const auto geometryHash = argc == 6 ? fileHash(QString::fromLocal8Bit(argv[5])) : QByteArray{};
     EditorWindow window({QString::fromLocal8Bit(argv[1]), QString::fromLocal8Bit(argv[2])});
+    const QJsonObject openingCamera{
+        {"pivot", QJsonArray{2, 3, -20}}, {"yawRadians", .2}, {"pitchRadians", -.6}, {"distance", 80}};
+    if (!capture && (window.setInitialCamera({}) || !window.setInitialCamera(openingCamera)))
+        return 1;
     window.show();
     window.openPath(capture ? QString::fromLocal8Bit(argv[3]) : QStringLiteral("synthetic.bld"),
                     argc == 6 ? QString::fromLocal8Bit(argv[5]) : QString{});
@@ -71,6 +75,16 @@ int main(int argc, char **argv) {
         }
         poll.stop();
         auto *preview = static_cast<SceneView *>(window.findChild<QWidget *>("sceneViewport"));
+        if (!capture) {
+            const auto actual = preview->cameraState();
+            if (actual.value("pivot") != openingCamera.value("pivot") ||
+                actual.value("distance").toDouble() != 80) {
+                std::fprintf(stderr, "Initial camera was lost during asynchronous scene loading\n");
+                app.exit(1);
+                return;
+            }
+            preview->frameAll();
+        }
         auto *x = window.findChild<QDoubleSpinBox *>("position0");
         auto *stage = window.findChild<QPushButton *>("stagePosition");
         auto *pending = window.findChild<QLabel *>("pendingCount");

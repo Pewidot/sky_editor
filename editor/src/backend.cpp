@@ -112,11 +112,30 @@ BackendResult renderLevelView(const BackendConfig &config, const QJsonObject &re
 }
 
 void callBackendAsync(QObject *owner, const BackendConfig &config, const QJsonObject &request,
-                      std::function<void(BackendResult)> finished) {
+                      std::function<void(BackendResult)> finished, std::function<void(QString)> progress) {
     auto *process = new QProcess(owner);
     auto *timer = new QTimer(process);
     timer->setSingleShot(true);
     auto completed = std::make_shared<bool>(false);
+    auto diagnostics = std::make_shared<QByteArray>(), lines = std::make_shared<QByteArray>();
+    if (progress)
+        QObject::connect(process, &QProcess::readyReadStandardError, process,
+                         [process, progress, diagnostics, lines] {
+                             const auto bytes = process->readAllStandardError();
+                             *diagnostics += bytes;
+                             *lines += bytes;
+                             while (lines->contains('\n')) {
+                                 const int at = lines->indexOf('\n');
+                                 const auto line = lines->left(at);
+                                 lines->remove(0, at + 1);
+                                 if (line.startsWith("PREVIEW_STAGE "))
+                                     progress(QString::fromUtf8(line.mid(14).left(200)));
+                             }
+                             if (lines->size() > 4096)
+                                 lines->clear();
+                             if (diagnostics->size() > 1024 * 1024)
+                                 diagnostics->remove(0, diagnostics->size() - 1024 * 1024);
+                         });
     auto complete = [process, timer, completed, finished](BackendResult result) {
         if (*completed)
             return;
@@ -126,7 +145,11 @@ void callBackendAsync(QObject *owner, const BackendConfig &config, const QJsonOb
         process->deleteLater();
     };
     QObject::connect(process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), process,
-                     [process, complete](int, QProcess::ExitStatus) { complete(decode(*process)); });
+                     [process, complete, diagnostics](int, QProcess::ExitStatus) {
+                         auto result = decode(*process);
+                         result.diagnostics = QString::fromUtf8(*diagnostics) + result.diagnostics;
+                         complete(result);
+                     });
     QObject::connect(process, &QProcess::errorOccurred, process,
                      [process, complete](QProcess::ProcessError error) {
                          if (error == QProcess::FailedToStart)

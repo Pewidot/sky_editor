@@ -152,7 +152,9 @@ export function createChapterUiDraft({ ui, languages }) {
     fixupSlots: { ROFS: [16], RPID: [80], RNEX: [112], RSTT: [144] },
     newStrings: [name],
     rootList: { rootEncoded: target.roots[0], appendObjects: [128] },
-    objectLists: [{ listEncoded: list.encoded, expectedType: 'ScriptSetList', appendObjects: [128] }],
+    objectLists: [
+      { listEncoded: list.encoded, expectedType: 'ScriptSetList', appendObjects: [128], insertAt: 18 },
+    ],
   });
   const buffer = Buffer.from(appended.buffer),
     before = parseIgz(buffer),
@@ -178,6 +180,40 @@ export function createChapterUiDraft({ ui, languages }) {
       reason: 'One statically owning incoming RHS slot redirected',
     },
   ];
+  // Runtime adventure order is 18 old stories, the new story, then four
+  // expansions. Description lookup uses that ID, not the title-list index.
+  // The two remaining users of the old 22 literal are display bounds checks.
+  const displayStack = encodedObject(before, stack.encoded);
+  buffer.writeUInt32LE(23, displayStack.offset + 64);
+  edits.push({
+    offset: displayStack.offset + 64,
+    width: 4,
+    before: 22,
+    after: 23,
+    reason: 'Include all 23 adventure IDs in both display bounds checks',
+  });
+  const thresholdRhs = z.objects[2211],
+    thresholdStack = z.objects[2212];
+  assert.equal(thresholdRhs.type, 'ValueRHSVariant');
+  assert.equal(thresholdStack.type, 'RHSValueStack');
+  assert.deepEqual(
+    z.pointerReferences.filter((p) => p.targetObjectIndex === 2211).map((p) => p.objectIndex),
+    [2208],
+  );
+  assert.deepEqual(
+    z.pointerReferences.filter((p) => p.targetObjectIndex === 2212).map((p) => p.objectIndex),
+    [2211],
+  );
+  assert.equal(z.u32(thresholdStack.offset + 64), 17);
+  const nextThreshold = encodedObject(before, thresholdStack.encoded);
+  buffer.writeUInt32LE(18, nextThreshold.offset + 64);
+  edits.push({
+    offset: nextThreshold.offset + 64,
+    width: 4,
+    before: 17,
+    after: 18,
+    reason: 'Only adventure IDs above 18 use the expansion unlock branch',
+  });
   const allowed = new Set(edits.flatMap((e) => Array.from({ length: e.width }, (_, i) => e.offset + i)));
   for (let i = 0; i < buffer.length; i++)
     assert.ok(buffer[i] === appended.buffer[i] || allowed.has(i), 'Unexpected post-append edit');
@@ -186,7 +222,13 @@ export function createChapterUiDraft({ ui, languages }) {
     newStack = encodedObject(rebuilt, target.appendOffset + 56);
   assert.equal(rebuilt.pointerReferencesByOffset.get(nextLoop.offset + 56)?.targetObjectIndex, newRhs.index);
   assert.equal(rebuilt.u32(newStack.offset + 64), 23);
-  assert.equal(rebuilt.u32(encodedObject(rebuilt, stack.encoded).offset + 64), 22);
+  assert.equal(rebuilt.u32(encodedObject(rebuilt, stack.encoded).offset + 64), 23);
+  const descriptionList = encodedObject(rebuilt, list.encoded),
+    descriptionData = rebuilt.pointerReferencesByOffset.get(descriptionList.offset + 32).targetOffset;
+  assert.equal(rebuilt.u64(descriptionData + 18 * 8), BigInt(target.appendOffset + 128));
+  const oldDescriptionData = z.pointerReferencesByOffset.get(list.offset + 32).targetOffset;
+  for (let i = 0; i < 22; i++)
+    assert.equal(rebuilt.u64(descriptionData + (i < 18 ? i : i + 1) * 8), z.u64(oldDescriptionData + i * 8));
   for (const id of [4263, 4353, 3098, 2281]) {
     const a = z.objects[id],
       b = encodedObject(rebuilt, a.encoded);
@@ -230,7 +272,9 @@ export function createChapterUiDraft({ ui, languages }) {
       sourceSha256: UI_SHA,
       outputSha256: sha(buffer),
       description,
-      loopLimit: { before: 22, after: 23, sharedLiteralPreserved: 22 },
+      descriptionAdventureId: 18,
+      expansionThreshold: { before: 17, after: 18 },
+      loopLimit: { before: 22, after: 23, sharedDisplayLimit: 23 },
       existingButtonReused: 3098,
       buttonCount: 23,
       edits,

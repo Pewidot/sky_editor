@@ -1,4 +1,5 @@
 #include "portaldialog.h"
+#include "nativegameview.h"
 
 #include <QBuffer>
 #include <QCheckBox>
@@ -25,6 +26,7 @@
 #include <QSignalBlocker>
 #include <QSpinBox>
 #include <QTableWidget>
+#include <QToolButton>
 #include <QUuid>
 #include <QVBoxLayout>
 
@@ -37,18 +39,39 @@ QString PortalDialog::newSessionPath() {
 PortalDialog::PortalDialog(BackendConfig config, QWidget *parent, const QString &controllerOverride)
     : QDialog(parent), config_(std::move(config)) {
     setWindowTitle("Virtual Portal of Power · shadPS4");
-    resize(1220, 960);
+    resize(1080, 640);
     controller_ = controllerOverride.isEmpty()
                       ? QFileInfo(config_.script).absoluteDir().filePath("portal_controller.mjs")
                       : controllerOverride;
     auto *layout = new QVBoxLayout(this);
+    const auto fold = [layout, this](const QString &title, const QString &name) {
+        auto *toggle = new QToolButton(this);
+        toggle->setText(title);
+        toggle->setObjectName(name);
+        toggle->setCheckable(true);
+        toggle->setArrowType(Qt::RightArrow);
+        toggle->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+        layout->addWidget(toggle);
+        auto *body = new QWidget(this);
+        auto *contents = new QVBoxLayout(body);
+        contents->setContentsMargins(8, 0, 8, 0);
+        layout->addWidget(body);
+        body->hide();
+        connect(toggle, &QToolButton::toggled, this, [body, toggle](bool open) {
+            body->setVisible(open);
+            toggle->setArrowType(open ? Qt::DownArrow : Qt::RightArrow);
+        });
+        return contents;
+    };
+    auto *settings = fold("Settings", "portalSettingsToggle");
     auto *notice =
         new QLabel("Launch a prepared disposable game tree with an isolated shadPS4 profile. Figure files "
                    "are copied before game writes. Slot state below records commands sent, not confirmation "
                    "that the game recognized a figure. See docs/PORTAL.md for prerequisites.");
     notice->setWordWrap(true);
     notice->setStyleSheet("color: #956300; padding: 5px;");
-    layout->addWidget(notice);
+    setToolTip(notice->text());
+    delete notice;
     auto *form = new QFormLayout;
     auto fileRow = [this](QLineEdit *&field, const QString &objectName, const QString &dialogTitle,
                           bool directory) {
@@ -92,13 +115,15 @@ PortalDialog::PortalDialog(BackendConfig config, QWidget *parent, const QString 
             resume_->setText(path);
     });
     form->addRow("Resume checkpoint", resumeRow);
-    x11_ = new QCheckBox("Force SDL X11 (optional)");
+    x11_ = new QCheckBox("Force SDL X11 (required for live host)");
+    x11_->setObjectName("portalX11");
+    x11_->setChecked(true);
     form->addRow("Display", x11_);
-    layout->addLayout(form);
+    settings->addLayout(form);
     auto *launch = new QHBoxLayout;
-    start_ = new QPushButton("Start session");
+    start_ = new QPushButton("Start");
     start_->setObjectName("portalStart");
-    stop_ = new QPushButton("Stop owned emulator");
+    stop_ = new QPushButton("Stop");
     stop_->setObjectName("portalStop");
     reset_ = new QPushButton("New session");
     reset_->setObjectName("portalReset");
@@ -126,18 +151,18 @@ PortalDialog::PortalDialog(BackendConfig config, QWidget *parent, const QString 
                 QUuid::createUuid().toString(QUuid::Id128).left(8)));
     });
     connect(checkpointOutput_, &QLineEdit::textChanged, this, [this] { updateControls(); });
-    layout->addLayout(checkpointRow);
+    settings->addLayout(checkpointRow);
     auto *checkpointNotice =
         new QLabel("Checkpoint = saved profile + managed figures. Stops the emulator first; resume boots the "
                    "game and uses stored progress, not an exact mid-frame state.");
-    checkpointNotice->setWordWrap(true);
-    layout->addWidget(checkpointNotice);
+    checkpoint_->setToolTip(checkpointNotice->text());
+    delete checkpointNotice;
     status_ = new QLabel("Starting portal controller…");
     status_->setObjectName("portalStatus");
     status_->setTextFormat(Qt::PlainText);
     status_->setWordWrap(true);
     layout->addWidget(status_);
-    auto *body = new QHBoxLayout;
+    auto *body = new QVBoxLayout;
     auto *figures = new QVBoxLayout;
     body->addLayout(figures, 1);
     layout->addLayout(body, 1);
@@ -174,25 +199,24 @@ PortalDialog::PortalDialog(BackendConfig config, QWidget *parent, const QString 
                                                        "Select a 1024-byte virtual figure file", false));
     figures->addLayout(figureForm);
     auto *operations = new QHBoxLayout;
-    insert_ = new QPushButton("Insert into selected slot");
+    insert_ = new QPushButton("Insert");
     insert_->setObjectName("portalInsert");
-    swap_ = new QPushButton("Swap selected slot");
+    swap_ = new QPushButton("Swap");
     swap_->setObjectName("portalSwap");
-    remove_ = new QPushButton("Remove selected slot");
+    remove_ = new QPushButton("Remove");
     remove_->setObjectName("portalRemove");
     operations->addWidget(insert_);
     operations->addWidget(swap_);
     operations->addWidget(remove_);
     operations->addStretch();
     figures->addLayout(operations);
-    auto *gamePanel = new QGroupBox("Owned game controls · input-IPC fork");
+    auto *gamePanel = new QGroupBox("Game controls");
     auto *gameLayout = new QVBoxLayout(gamePanel);
     body->addWidget(gamePanel, 1);
     gameCapabilities_ = new QLabel;
     gameCapabilities_->setObjectName("portalGameCapabilities");
     gameCapabilities_->setTextFormat(Qt::PlainText);
     gameCapabilities_->setWordWrap(true);
-    gameLayout->addWidget(gameCapabilities_);
     auto *timing = new QHBoxLayout;
     pulseDuration_ = new QSpinBox;
     pulseDuration_->setObjectName("portalPulseDuration");
@@ -209,7 +233,6 @@ PortalDialog::PortalDialog(BackendConfig config, QWidget *parent, const QString 
     timing->addWidget(pulseDuration_);
     timing->addWidget(new QLabel("Capture timeout"));
     timing->addWidget(captureTimeout_);
-    gameLayout->addLayout(timing);
     auto *pad = new QGridLayout;
     const auto addInput = [this, pad](int row, int column, const QString &label, const QString &kind,
                                       const QString &name, const QString &objectName) {
@@ -244,7 +267,7 @@ PortalDialog::PortalDialog(BackendConfig config, QWidget *parent, const QString 
     auto *captureRow = new QHBoxLayout;
     captureAfterInput_ = new QCheckBox("Capture after input");
     captureAfterInput_->setObjectName("portalCaptureAfterInput");
-    captureAfterInput_->setChecked(true);
+    captureAfterInput_->setChecked(false);
     capture_ = new QPushButton("Capture fresh frame");
     capture_->setObjectName("portalCapture");
     capture_->setAutoDefault(false);
@@ -252,11 +275,16 @@ PortalDialog::PortalDialog(BackendConfig config, QWidget *parent, const QString 
     captureRow->addWidget(capture_, 1);
     gameLayout->addLayout(captureRow);
     connect(capture_, &QPushButton::clicked, this, [this] { captureFrame(); });
+    openNativeView_ = new QPushButton("Live");
+    openNativeView_->setObjectName("portalNativeView");
+    openNativeView_->setToolTip("Host the owned emulator's live X11 window with bounded WASD/RMB camera "
+                                "control; explicit PNG fallback.");
+    launch->insertWidget(1, openNativeView_);
+    connect(openNativeView_, &QPushButton::clicked, this, [this] { openNativeView(); });
     gameFeedback_ = new QLabel("One bounded pulse per click. Input acknowledgment is not game acceptance.");
     gameFeedback_->setObjectName("portalGameFeedback");
     gameFeedback_->setWordWrap(true);
     gameFeedback_->setTextFormat(Qt::PlainText);
-    gameLayout->addWidget(gameFeedback_);
     framePreview_ = new QLabel;
     framePreview_->setObjectName("portalFramePreview");
     framePreview_->setAlignment(Qt::AlignCenter);
@@ -266,40 +294,38 @@ PortalDialog::PortalDialog(BackendConfig config, QWidget *parent, const QString 
     framePreview_->setMaximumHeight(260);
     framePreview_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Expanding);
     framePreview_->setStyleSheet("background:#17212b; color:#d3dde7; border:1px solid #435466; padding:4px;");
-    gameLayout->addWidget(framePreview_, 1);
     frameInfo_ = new QLabel;
     frameInfo_->setObjectName("portalFrameInfo");
     frameInfo_->setTextFormat(Qt::PlainText);
     frameInfo_->setWordWrap(true);
-    gameLayout->addWidget(frameInfo_);
     capturePath_ = new QLineEdit;
     capturePath_->setObjectName("portalCapturePath");
     capturePath_->setReadOnly(true);
     capturePath_->setPlaceholderText("Verified screenshot path appears here");
-    gameLayout->addWidget(capturePath_);
     clearFrame("No game frame captured. This preview is a snapshot, not a live stream.");
     log_ = new QPlainTextEdit;
     log_->setReadOnly(true);
     log_->setMaximumBlockCount(300);
     log_->setMaximumHeight(105);
-    layout->addWidget(log_);
+    auto *diagnostics = fold("Snapshots and diagnostics", "portalDiagnosticsToggle");
+    diagnostics->addWidget(gameCapabilities_);
+    diagnostics->addLayout(timing);
+    diagnostics->addWidget(gameFeedback_);
+    diagnostics->addWidget(framePreview_);
+    diagnostics->addWidget(frameInfo_);
+    diagnostics->addWidget(capturePath_);
+    diagnostics->addWidget(log_);
 
-    connect(start_, &QPushButton::clicked, this, [this] {
-        QJsonObject arguments{{"emulator", emulator_->text()},
-                              {"game", game_->text()},
-                              {"session", session_->text()},
-                              {"x11", x11_->isChecked()}};
-        if (!resume_->text().isEmpty())
-            arguments.insert("resumeFrom", resume_->text());
-        send("portal_start", arguments, [this](QJsonObject result, QString error) {
-            if (error.isEmpty()) {
-                launched_ = true;
-                applyStatus(result);
-                log("Launched isolated session: " + result.value("session").toString());
-            }
-        });
-    });
+    connect(start_, &QPushButton::clicked, this, [this] { launchOwnedSession(); });
     connect(stop_, &QPushButton::clicked, this, [this] {
+        if (nativeView_)
+            nativeView_->stopRefresh("Stopping the owned emulator.");
+        if (pendingId_) {
+            stopQueued_ = true;
+            if (nativeView_)
+                nativeView_->releaseCameraInput();
+            return;
+        }
         send("portal_stop", {}, [this](QJsonObject result, QString error) {
             if (error.isEmpty()) {
                 applyStatus(result);
@@ -308,6 +334,8 @@ PortalDialog::PortalDialog(BackendConfig config, QWidget *parent, const QString 
         });
     });
     connect(checkpoint_, &QPushButton::clicked, this, [this] {
+        if (nativeView_)
+            nativeView_->stopRefresh("Stopping the emulator to save a checkpoint.");
         log("Stopping the owned emulator and saving its profile/figures checkpoint…");
         send("portal_checkpoint", {{"output", checkpointOutput_->text()}},
              [this](QJsonObject result, QString error) {
@@ -325,6 +353,8 @@ PortalDialog::PortalDialog(BackendConfig config, QWidget *parent, const QString 
              });
     });
     connect(reset_, &QPushButton::clicked, this, [this] {
+        if (nativeView_)
+            nativeView_->stopRefresh("Changing controller session.");
         resetAfterExit_ = true;
         if (controllerRunning())
             process_.closeWriteChannel();
@@ -374,6 +404,8 @@ PortalDialog::PortalDialog(BackendConfig config, QWidget *parent, const QString 
         if (error == QProcess::FailedToStart) {
             ready_ = false;
             log("Controller failed to start: " + process_.errorString());
+            if (onLaunchFailed)
+                onLaunchFailed(process_.errorString());
             updateControls();
             if (closing_)
                 finishedShutdown();
@@ -387,7 +419,12 @@ PortalDialog::PortalDialog(BackendConfig config, QWidget *parent, const QString 
                 usbReady_ = false;
                 pendingId_ = 0;
                 reply_ = {};
+                emulatorPid_ = 0;
+                launchWhenReady_ = false;
                 inputSupported_ = captureSupported_ = false;
+                nativeCameraAvailable_ = nativeCameraHeld_ = cameraRestoreQueued_ = false;
+                if (nativeView_)
+                    nativeView_->captureFailed("Controller stopped. Refresh stopped.");
                 clearFrame("Controller stopped. Previous snapshot cleared.");
                 log(QString("Controller exited (%1).").arg(code));
                 updateControls();
@@ -404,6 +441,8 @@ PortalDialog::PortalDialog(BackendConfig config, QWidget *parent, const QString 
         gameFeedback_->setText("Controller timeout: outcome unknown. Stopping this owned session; no older "
                                "image will be shown.");
         clearFrame("Capture unavailable: controller timed out.");
+        if (nativeView_)
+            nativeView_->captureFailed("Controller request timed out. Refresh stopped.");
         ready_ = false;
         pendingId_ = 0;
         reply_ = {};
@@ -427,6 +466,13 @@ PortalDialog::PortalDialog(BackendConfig config, QWidget *parent, const QString 
 
 PortalDialog::~PortalDialog() {
     poll_.stop();
+    if (nativeView_) {
+        nativeView_->close();
+        nativeView_->stopRefresh("Portal closed.");
+        nativeView_->requestCapture = {};
+        nativeView_->requestCamera = {};
+        nativeView_->requestCameraRestore = {};
+    }
     if (controllerRunning()) {
         process_.closeWriteChannel();
         if (!process_.waitForFinished(1000)) {
@@ -434,6 +480,59 @@ PortalDialog::~PortalDialog() {
             process_.waitForFinished(7000);
         }
     }
+}
+bool PortalDialog::applyLaunchSettings(const QJsonObject &settings, bool startAfterReady, bool openNativeView,
+                                       QString *error) {
+    if (closing_ || emulatorRunning_ || launched_ || launchWhenReady_) {
+        if (error)
+            *error = "A running, closing or already-used Portal session cannot be reconfigured. Create a "
+                     "fresh session.";
+        return false;
+    }
+    for (const auto &key : {"emulator", "game", "session"})
+        if (settings.value(key).toString().isEmpty()) {
+            if (error)
+                *error = QString("Prepared launch is missing %1.").arg(key);
+            return false;
+        }
+    emulator_->setText(settings.value("emulator").toString());
+    game_->setText(settings.value("game").toString());
+    session_->setText(settings.value("session").toString());
+    resume_->setText(settings.value("resumeFrom").toString());
+    x11_->setChecked(settings.value("x11").toBool(true));
+    launchWhenReady_ = startAfterReady;
+    openNativeAfterLaunch_ = openNativeView;
+    updateControls();
+    if (launchWhenReady_ && ready_ && !pendingId_)
+        launchOwnedSession();
+    if (error)
+        error->clear();
+    return true;
+}
+void PortalDialog::launchOwnedSession() {
+    if (!ready_ || pendingId_ || closing_ || launched_ || emulatorRunning_)
+        return;
+    launchWhenReady_ = false;
+    QJsonObject arguments{{"emulator", emulator_->text()},
+                          {"game", game_->text()},
+                          {"session", session_->text()},
+                          {"x11", x11_->isChecked()}};
+    if (!resume_->text().isEmpty())
+        arguments.insert("resumeFrom", resume_->text());
+    send("portal_start", arguments, [this](QJsonObject result, QString error) {
+        if (error.isEmpty()) {
+            launched_ = true;
+            applyStatus(result);
+            log("Launched isolated session: " + result.value("session").toString());
+            if (openNativeAfterLaunch_) {
+                openNativeAfterLaunch_ = false;
+                openNativeView();
+            }
+            if (onLaunched)
+                onLaunched();
+        } else if (onLaunchFailed)
+            onLaunchFailed(error);
+    });
 }
 void PortalDialog::log(const QString &message) {
     log_->appendPlainText(QDateTime::currentDateTime().toString("HH:mm:ss ") + message);
@@ -449,6 +548,11 @@ void PortalDialog::startController() {
     inputProtocolFault_ = captureProtocolFault_ = false;
     lastCaptureRequestId_ = 0;
     seenFramePaths_.clear();
+    lastCaptureLatencyMs_ = 0;
+    nativeCameraAvailable_ = nativeCameraHeld_ = cameraRestoreQueued_ = false;
+    nativeCameraRemainingMs_ = 0;
+    if (nativeView_)
+        nativeView_->resetSession();
     clearFrame("No game frame captured in this session.");
     if (QFileInfo::exists(session_->text()))
         session_->setText(newSessionPath());
@@ -463,6 +567,7 @@ void PortalDialog::send(const QString &operation, const QJsonObject &arguments,
     if (!ready_ || pendingId_)
         return;
     pendingId_ = ++sequence_;
+    pendingOperation_ = operation;
     reply_ = std::move(complete);
     process_.write(
         QJsonDocument(QJsonObject{{"id", pendingId_}, {"operation", operation}, {"arguments", arguments}})
@@ -496,6 +601,7 @@ void PortalDialog::readOutput() {
         }
         timeout_.stop();
         pendingId_ = 0;
+        pendingOperation_.clear();
         auto complete = std::move(reply_);
         reply_ = {};
         const auto errorValue = response.value("error");
@@ -508,6 +614,14 @@ void PortalDialog::readOutput() {
         if (complete)
             complete(response.value("result").toObject(), error);
         updateControls();
+        if (stopQueued_ && !pendingId_ && !closing_) {
+            stopQueued_ = false;
+            stop_->click();
+        }
+        if (cameraRestoreQueued_ && !pendingId_ && !closing_)
+            requestNativeCameraRestore();
+        if (launchWhenReady_ && !pendingId_ && !closing_)
+            launchOwnedSession();
         if (closing_)
             advanceShutdown();
     }
@@ -520,6 +634,10 @@ void PortalDialog::readOutput() {
 void PortalDialog::queryStatus() {
     if (!ready_ || pendingId_ || closing_)
         return;
+    if (cameraRestoreQueued_) {
+        requestNativeCameraRestore();
+        return;
+    }
     send("portal_status", {}, [this](QJsonObject result, QString error) {
         if (error.isEmpty())
             applyStatus(result);
@@ -529,6 +647,8 @@ void PortalDialog::applyStatus(const QJsonObject &status) {
     const bool wasInputUncertain = inputUncertain_;
     emulatorRunning_ = status.value("running").toBool();
     usbReady_ = status.value("usbBackendReady").toBool();
+    emulatorPid_ = emulatorRunning_ ? status.value("pid").toInteger() : 0;
+    applyNativeCameraState(status.value("nativeCamera").toObject());
     const auto capabilities = status.value("capabilities").toObject();
     inputSupported_ = capabilities.value("inputPulse").toBool();
     captureSupported_ = capabilities.value("captureGameFrame").toBool();
@@ -554,11 +674,11 @@ void PortalDialog::applyStatus(const QJsonObject &status) {
     if (!emulatorRunning_ && !frame_.isNull())
         clearFrame("Owned emulator stopped. Previous snapshot cleared.");
     slots_ = status.value("slots").toArray();
-    status_->setText(QString("Emulator: %1 · IPC handshake: %2 · USB backend: %3\nSlots show commands sent; "
-                             "verify figure recognition and swaps in the game.")
+    status_->setText(QString("Emulator: %1 · IPC: %2 · Portal: %3")
                          .arg(emulatorRunning_ ? "running" : "stopped",
                               status.value("ipcHandshake").toBool() ? "complete" : "waiting",
                               usbReady_ ? "initialized" : "waiting"));
+    status_->setToolTip("Slot state records commands sent, not in-game figure recognition.");
     if (status.value("failure").isString())
         log("Emulator failure: " + status.value("failure").toString());
     const int selected = qMax(0, table_->currentRow());
@@ -581,11 +701,13 @@ void PortalDialog::applyStatus(const QJsonObject &status) {
 }
 void PortalDialog::updateControls() {
     const bool idle = ready_ && !pendingId_ && !closing_;
+    const bool motion =
+        pendingOperation_ == "portal_camera_move" || pendingOperation_ == "portal_camera_renew";
     const int slot = table_->currentRow();
     const bool occupied = slot >= 0 && slot < slots_.size() && slots_[slot].isObject();
     start_->setEnabled(idle && !launched_ && !emulator_->text().isEmpty() && !game_->text().isEmpty() &&
                        !session_->text().isEmpty());
-    stop_->setEnabled(idle && emulatorRunning_);
+    stop_->setEnabled(ready_ && (!pendingId_ || motion) && !closing_ && emulatorRunning_);
     checkpoint_->setEnabled(idle && launched_ && !checkpointOutput_->text().isEmpty());
     // A failed start may have partially initialized the controller. Always let
     // the user create a fresh controller when no owned emulator is running.
@@ -604,12 +726,29 @@ void PortalDialog::updateControls() {
     remove_->setEnabled(canWrite && occupied);
     const bool gameReady = idle && emulatorRunning_ && usbReady_;
     for (auto *button : gameButtons_)
-        button->setEnabled(gameReady && inputSupported_ && !inputUncertain_ && !inputProtocolFault_);
+        button->setEnabled(gameReady && !nativeCameraHeld_ && inputSupported_ && !inputUncertain_ &&
+                           !inputProtocolFault_);
     capture_->setEnabled(gameReady && captureSupported_ && !captureUncertain_ && !captureProtocolFault_);
     pulseDuration_->setEnabled(idle && inputSupported_);
     captureTimeout_->setEnabled(idle && captureSupported_ && !captureUncertain_);
     captureAfterInput_->setEnabled(idle && inputSupported_ && captureSupported_ && !captureUncertain_ &&
                                    !captureProtocolFault_);
+    openNativeView_->setEnabled(!closing_);
+    if (nativeView_) {
+        nativeView_->setOwnedSession(process_.processId(), emulatorPid_, emulator_->text());
+        const bool available = ready_ && !closing_ && emulatorRunning_ && usbReady_ && captureSupported_ &&
+                               !captureUncertain_ && !captureProtocolFault_ && !inputProtocolFault_;
+        nativeView_->setCaptureAvailability(
+            available, pendingId_ != 0,
+            closing_                       ? "Portal is closing."
+            : !ready_ || !emulatorRunning_ ? "No running owned emulator."
+            : !captureSupported_           ? "This emulator does not support native game capture."
+            : !usbReady_                   ? "Waiting for the owned session to initialize."
+                         : "Capture is unavailable after a timeout or protocol fault. Start a new session.",
+            motion);
+        nativeView_->setCameraState(available && nativeCameraAvailable_, nativeCameraHeld_,
+                                    nativeCameraRemainingMs_, nativeCameraMessage_, nativeUiHidden_);
+    }
 }
 void PortalDialog::sendInput(const QString &kind, const QString &name) {
     if (!ready_ || pendingId_ || closing_ || !emulatorRunning_ || !usbReady_ || !inputSupported_ ||
@@ -651,10 +790,13 @@ void PortalDialog::sendInput(const QString &kind, const QString &name) {
                  queryStatus();
          });
 }
-void PortalDialog::captureFrame() {
+bool PortalDialog::captureFrame() {
     if (!ready_ || pendingId_ || closing_ || !emulatorRunning_ || !usbReady_ || !captureSupported_ ||
         captureUncertain_ || captureProtocolFault_)
-        return;
+        return false;
+    captureLatency_.start();
+    if (nativeView_)
+        nativeView_->captureStarted();
     clearFrame("Waiting for a fresh native game frame…");
     gameFeedback_->setText("Capturing the owned game's frame; an older screenshot will not be substituted.");
     send("portal_capture", {{"timeoutMs", captureTimeout_->value()}},
@@ -673,9 +815,83 @@ void PortalDialog::captureFrame() {
                  clearFrame("No fresh frame available. Previous image cleared.");
                  gameFeedback_->setText("Capture failed: " + error);
                  log(gameFeedback_->text());
+                 if (nativeView_)
+                     nativeView_->captureFailed("Capture failed. Refresh stopped: " + error);
              }
              queryStatus();
          });
+    return true;
+}
+void PortalDialog::openNativeView() {
+    if (closing_)
+        return;
+    if (!nativeView_) {
+        nativeView_ = new NativeGameView(this);
+        nativeView_->requestCapture = [this] { return captureFrame(); };
+        nativeView_->requestCamera = [this](const QString &operation, const QJsonObject &arguments) {
+            return requestNativeCamera(operation, arguments);
+        };
+        nativeView_->requestCameraRestore = [this] { requestNativeCameraRestore(); };
+    }
+    if (hostNativeView) {
+        if (nativeView_->isWindow())
+            nativeView_->setWindowFlags(Qt::Widget);
+        hostNativeView(nativeView_);
+        nativeView_->show();
+    } else {
+        nativeView_->show();
+        nativeView_->raise();
+        nativeView_->activateWindow();
+    }
+    updateControls();
+    if (!frame_.isNull())
+        nativeView_->presentFrame(frame_, frameInfo_->text(), capturePath_->text(), lastCaptureLatencyMs_);
+}
+void PortalDialog::applyNativeCameraState(const QJsonObject &state) {
+    nativeCameraAvailable_ = state.value("available").toBool();
+    nativeCameraHeld_ = state.value("enabled").toBool();
+    nativeCameraRemainingMs_ = state.value("remainingMs").toInt();
+    nativeUiHidden_ = state.value("uiHidden").toBool();
+    nativeCameraMessage_ =
+        !state.value("lastFault").toString().isEmpty() ? state.value("lastFault").toString()
+        : nativeCameraAvailable_
+            ? "Enable free camera, then focus the view for WASD / Q/E / RMB. Active until Restore; heartbeat "
+              "protects against an abandoned hold."
+            : "Native camera unavailable: start the supported owned emulator/game session.";
+}
+bool PortalDialog::requestNativeCamera(const QString &operation, const QJsonObject &arguments) {
+    if (!ready_ || pendingId_ || closing_ || !emulatorRunning_ || !usbReady_)
+        return false;
+    if (operation != "portal_camera_disable" &&
+        (!nativeCameraAvailable_ || captureUncertain_ || captureProtocolFault_ || inputProtocolFault_))
+        return false;
+    send(operation, arguments, [this, operation](QJsonObject result, QString error) {
+        if (error.isEmpty())
+            applyNativeCameraState(result);
+        else {
+            nativeCameraMessage_ = "Native camera request failed: " + error;
+            log(nativeCameraMessage_);
+        }
+        updateControls();
+        if (nativeView_)
+            nativeView_->cameraActionFinished(error.isEmpty(), nativeCameraMessage_);
+        if (closing_ || cameraRestoreQueued_)
+            return;
+        if (!pendingId_ && operation != "portal_camera_move" && operation != "portal_camera_renew")
+            queryStatus();
+    });
+    return true;
+}
+void PortalDialog::requestNativeCameraRestore() {
+    cameraRestoreQueued_ = true;
+    if (!ready_ || closing_ || !emulatorRunning_) {
+        cameraRestoreQueued_ = false;
+        return;
+    }
+    if (pendingId_)
+        return;
+    cameraRestoreQueued_ = false;
+    requestNativeCamera("portal_camera_disable", {});
 }
 void PortalDialog::clearFrame(const QString &message) {
     frame_ = QImage();
@@ -684,6 +900,8 @@ void PortalDialog::clearFrame(const QString &message) {
     framePreview_->setProperty("capturePath", QString());
     capturePath_->clear();
     frameInfo_->setText("Snapshot only · never a desktop capture");
+    if (nativeView_)
+        nativeView_->clearFrame(message);
 }
 bool PortalDialog::showFrame(const QJsonObject &result, QString &error) {
     const auto reject = [&error](const QString &message) {
@@ -741,6 +959,9 @@ bool PortalDialog::showFrame(const QJsonObject &result, QString &error) {
                             .arg(dimensions.width())
                             .arg(dimensions.height())
                             .arg(QDateTime::currentDateTime().toString("HH:mm:ss"), digest.left(20)));
+    lastCaptureLatencyMs_ = captureLatency_.isValid() ? captureLatency_.elapsed() : 0;
+    if (nativeView_)
+        nativeView_->presentFrame(frame_, frameInfo_->text(), canonical, lastCaptureLatencyMs_);
     resizeFrame();
     return true;
 }
@@ -761,6 +982,10 @@ void PortalDialog::requestShutdown(std::function<void()> complete) {
         shutdownCallbacks_.push_back(std::move(complete));
     closing_ = true;
     poll_.stop();
+    if (nativeView_) {
+        nativeView_->stopRefresh("Portal is closing.");
+        nativeView_->close();
+    }
     updateControls();
     advanceShutdown();
 }

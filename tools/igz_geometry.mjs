@@ -239,6 +239,16 @@ function geometryReader(input, { maxVertices = 2_000_000, maxIndices = 12_000_00
       nv > 0 && ni > 0 && nv <= maxVertices && ni <= maxIndices,
       'Invalid or excessive vertex/index count',
     );
+    // Native GPU allocation also consumes the per-stream count array. A
+    // scalar-only resize can look valid in an offline mesh and fail in-game.
+    for (const [b, count] of [
+      [vb, nv],
+      [ib, ni],
+    ]) {
+      check(z.u32(b.offset + 0x10) === 4, 'Only single-stream count arrays are supported');
+      const counts = pointer(b, 0x18, 4).targetOffset;
+      check(z.u32(counts) === count, `${b.type} scalar and stream counts disagree`);
+    }
     check(
       vertexCount + nv <= maxVertices && indexCount + ni <= maxIndices,
       'Scene exceeds geometry resource limits',

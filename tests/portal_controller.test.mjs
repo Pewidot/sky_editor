@@ -11,6 +11,32 @@ import readline from 'node:readline';
 import { crc16, createFigure, inspectFigure } from '../tools/sky_figure.mjs';
 import { PortalController } from '../tools/portal_controller.mjs';
 
+test('startup milestones are bounded, deduplicated observations, not gameplay readiness', () => {
+  const portal = new PortalController();
+  portal.spawnStartedAt = 0;
+  const opened = (file) =>
+    portal.outputLine(
+      `[Kernel.Fs] <Info> file_system.cpp:81 open: path = /app0/${file} flags = 0x0 mode = 0777`,
+      'stdout',
+    );
+  opened('level/title.bld');
+  opened('level/title.bld');
+  opened('movies/atvinewlogo_640.mov');
+  opened('save/private-file');
+  opened('level/../private');
+  assert.deepEqual(
+    portal.status().startup.milestones.map((e) => e.file),
+    ['level/title.bld', 'movies/atvinewlogo_640.mov'],
+  );
+  assert.equal(portal.ready, false);
+  for (let i = 0; i < 200; i++) opened(`level/test${i}.bld`);
+  assert.equal(portal.status().startup.milestones.length, 128);
+  assert.ok(portal.status().startup.milestones.every((e) => e.elapsedMs >= 0));
+  const copied = portal.status().startup.milestones;
+  copied[0].file = 'changed';
+  assert.equal(portal.status().startup.milestones[0].file, 'level/title.bld');
+});
+
 test('blank figure uses valid serial/header checksums and sector access fields', () => {
   assert.equal(crc16(Buffer.from('123456789')), 0x29b1);
   const data = createFigure(462, 0x3000, Buffer.from([1, 2, 3, 4]));
@@ -97,7 +123,15 @@ test(
     };
     try {
       assert.equal((await rpc('initialize', {})).result.serverInfo.name, 'skylanders-portal-controller');
-      assert.equal((await rpc('tools/list')).result.tools.length, 12);
+      const listed = (await rpc('tools/list')).result.tools;
+      assert.equal(listed.length, 18);
+      assert.ok(listed.some((tool) => tool.name === 'portal_camera_enable'));
+      assert.ok(
+        listed.some(
+          (tool) =>
+            tool.name === 'portal_camera_move' && tool.inputSchema.properties.forward.type === 'number',
+        ),
+      );
       await call('portal_start', { emulator, game, session: path.join(temp, 'session') });
       let state;
       for (let attempt = 0; attempt < 100; attempt++) {

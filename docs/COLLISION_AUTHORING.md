@@ -1,15 +1,20 @@
 # Collision authoring: primitive-surface route
 
-Status: native/static investigation plus a guarded scalar-editing tool,
-2026-10-13. Only synthetic fixtures have been built by this investigation;
-real game assets were inspected without changes. Player grounding on an
-authored platform and a complete new playable map remain unproved.
+Update2026-10-14: the [native Gallardo sandbox](NATIVE_DEMO.md) now verifies
+player grounding on an authored BOX platform and blocking by a car BOX proxy.
+ROOT membership alone was insufficient; both placements also need membership
+in the active lighting ScriptSetList encoded189400. The floor holds atY100.010002.
+Discarded donor collision is replaced by an exact empty pack already present in
+the same source level, retaining separate storage. Walk-off/recovery and return
+to an original chapter were tested in shadPS4. This is not arbitrary mesh/Havok
+collision authoring. The sections below retain the original2026-10-13 analysis.
 
 The best current route is **game-created actor box surfaces**, not manufacturing
 an `hkpBoxShape` packfile. The executable constructs Havok boxes, and existing
 actors describe solid box surfaces through `CollisionInfo`. The serialized
-settings-to-physics-builder connection is now proven; player grounding and
-actor-script behavior still require runtime tests. Merely replacing a visible
+settings-to-physics-builder connection is proven; the narrow BOX grounding
+route now also has runtime evidence. Other actor-script behavior still requires
+its own tests. Merely replacing a visible
 mesh is insufficient.
 
 ## Search boundary and packfile observations

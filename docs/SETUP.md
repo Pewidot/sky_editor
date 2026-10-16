@@ -14,7 +14,7 @@ an accepted archive/header alone does not establish equivalent game behavior.
 
 Required for the archive tools:
 
-- Node.js 24 or newer for the complete toolset; no runtime npm modules are required.
+- Node.js 24 or newer for the complete toolset and tests; no runtime npm modules are required.
 - A C++17 compiler available as `c++`, `pkg-config`, and liblzma development files
   (5.2 or newer).
 
@@ -22,12 +22,19 @@ Required for the desktop editor and its MCP server:
 
 - CMake 3.21 or newer, GNU Make, and Qt 6.2 or newer Core/Widgets/OpenGL development files.
 - A desktop/display for the GUI. The MCP mode and automated Qt tests work headlessly.
+- Optional live game-window hosting: X11/XWayland plus `xcb` and `xcb-shape`
+  development libraries. Without them the explicit PNG fallback still works.
 
 For Debian/Ubuntu, the usual build dependencies are:
 
 ```bash
 sudo apt install build-essential pkg-config liblzma-dev cmake qt6-base-dev libqt6opengl6-dev
 ```
+
+For the native live preview on Debian/Ubuntu, also install `libxcb1-dev` and
+`libxcb-shape0-dev` before configuring the editor. See
+[saved preview setup](GAME_PREVIEW.md) for the separate emulator, checkpoint
+and private-game requirements.
 
 Install a supported Node.js version separately if your distribution's package
 is older than 24. The helper never invokes a package manager or changes system
@@ -169,7 +176,10 @@ by SHA-256 and explain which inner files to extract from your own game.
 Native metadata additionally requires your own matching `eboot.elf`; setup does
 not automatically produce that ELF or install REA/Ghidra. These JSON reports are
 local game-derived research, not distributable source assets or working chapter
-recipes. The tools currently do not add chapter slots or compile new scripts.
+recipes. A later narrow [native demo workflow](NATIVE_DEMO.md) now builds a
+playable grid/Gallardo sandbox and documents its additional registration and
+save prerequisites. The ordinary setup helper does not install that chapter,
+and a general script/chapter compiler remains unfinished.
 See [the REA/ELF reproduction notes](FINDINGS.md#reproduce-the-rea-analysis)
 for the tested plaintext-SELF reconstruction and exact executable digest.
 

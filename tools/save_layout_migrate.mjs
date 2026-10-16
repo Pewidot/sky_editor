@@ -97,7 +97,7 @@ const rangeSize = (ranges) => ranges.reduce((n, range) => n + range.bitLength, 0
  * their runtime provenance. Bit numbering is LSB-first inside each byte.
  */
 export function migrateSaveLayout(options) {
-  keys(options, ['source', 'expectedSha256', 'oldSchema', 'newSchema'], 'migration request');
+  keys(options, ['source', 'expectedSha256', 'oldSchema', 'newSchema', 'elementMaps'], 'migration request');
   const { source, expectedSha256 } = options;
   check(
     Buffer.isBuffer(source) && source.length >= 5 && source.length <= MAX_PAYLOAD + 4,
@@ -130,6 +130,25 @@ export function migrateSaveLayout(options) {
     check(a.width === b.width, 'Field width changed: ' + a.key);
     check(b.count >= a.count, 'Field count decreased: ' + a.key);
   }
+  const elementMaps = options.elementMaps ?? {};
+  keys(
+    elementMaps,
+    old.schema.fields.map((f) => f.key),
+    'elementMaps',
+  );
+  const destinations = old.schema.fields.map((a, index) => {
+    const map = Object.hasOwn(elementMaps, a.key)
+      ? elementMaps[a.key]
+      : Array.from({ length: a.count }, (_, i) => i);
+    check(
+      Array.isArray(map) && map.length === a.count,
+      'Element map must contain exactly one destination per source element: ' + a.key,
+    );
+    for (const destination of map)
+      integer(destination, 0, next.schema.fields[index].count - 1, 'element destination: ' + a.key);
+    check(new Set(map).size === map.length, 'Duplicate element destination: ' + a.key);
+    return [...map];
+  });
   const buffer = Buffer.alloc(next.schema.payloadBytes + 4),
     output = buffer.subarray(0, -4);
   const unknownPreserved = [],
@@ -159,13 +178,39 @@ export function migrateSaveLayout(options) {
   for (let at = 0; at < next.bits; at++)
     if (!bit(next.coverage, at) && (at >= old.bits || bit(old.coverage, at))) addRange(newUnknownZero, at);
   const fields = old.schema.fields.map((a, index) => {
-    const b = next.schema.fields[index];
+    const b = next.schema.fields[index],
+      map = destinations[index];
     // Copy each original element's raw encoding. Never decode signed values,
     // clamp to limits, adjust sentinels, set progress or guess new defaults.
     for (let element = 0; element < a.count; element++)
       for (let j = 0; j < a.width; j++)
         if (bit(oldPayload, a.bitIndex + element * a.width + j))
-          setBit(output, b.bitIndex + element * b.width + j);
+          setBit(output, b.bitIndex + map[element] * b.width + j);
+    if (Object.hasOwn(elementMaps, a.key)) {
+      const used = new Set(map),
+        empty = Array.from({ length: b.count }, (_, i) => i).filter((i) => !used.has(i));
+      return {
+        key: a.key,
+        ...(a.name === undefined ? {} : { name: a.name }),
+        width: a.width,
+        previousCount: a.count,
+        count: b.count,
+        copied: {
+          sourceBitIndex: a.bitIndex,
+          destinationBitIndex: b.bitIndex,
+          elements: a.count,
+          strideBits: a.width,
+          bitLength: a.count * a.width,
+          destinationElementBySourceElement: map,
+        },
+        zeroInitialized: {
+          destinationElements: empty,
+          elements: empty.length,
+          strideBits: a.width,
+          bitLength: empty.length * a.width,
+        },
+      };
+    }
     return {
       key: a.key,
       ...(a.name === undefined ? {} : { name: a.name }),
@@ -191,14 +236,19 @@ export function migrateSaveLayout(options) {
   });
   // Independent readback from completed buffers, including all zero-grown slots.
   for (const [index, a] of old.schema.fields.entries()) {
-    const b = next.schema.fields[index];
-    for (let j = 0; j < a.count * a.width; j++)
-      check(
-        bit(oldPayload, a.bitIndex + j) === bit(output, b.bitIndex + j),
-        'Copied field readback mismatch',
-      );
-    for (let j = a.count * a.width; j < b.count * b.width; j++)
-      check(bit(output, b.bitIndex + j) === 0, 'Added element is not zero');
+    const b = next.schema.fields[index],
+      map = destinations[index],
+      used = new Set(map);
+    for (let i = 0; i < a.count; i++)
+      for (let j = 0; j < a.width; j++)
+        check(
+          bit(oldPayload, a.bitIndex + i * a.width + j) === bit(output, b.bitIndex + map[i] * b.width + j),
+          'Copied field readback mismatch',
+        );
+    for (let i = 0; i < b.count; i++)
+      if (!used.has(i))
+        for (let j = 0; j < b.width; j++)
+          check(bit(output, b.bitIndex + i * b.width + j) === 0, 'Added element is not zero');
   }
   for (const range of unknownPreserved)
     for (let j = 0; j < range.bitLength; j++)
@@ -266,6 +316,7 @@ export function migrateSaveLayout(options) {
       },
       limitations: [
         'Schemas are caller-supplied observations; this tool does not discover or independently validate the executed runtime layout.',
+        'Optional per-field element maps are explicit caller policy; chapter ordering must be established independently for each field.',
         'Raw signed/sentinel encodings are preserved without interpreting field semantics or changing version values.',
         'Zero for a new element is a structural initialization policy, not proof of a valid gameplay default.',
         'No unlock, chapter ID, old-progress compatibility, runtime loading or saving acceptance is claimed.',
@@ -300,7 +351,7 @@ function readStart(fd, length) {
 export function writeSaveLayoutMigration(options) {
   keys(
     options,
-    ['source', 'expectedSha256', 'oldSchema', 'newSchema', 'outputDirectory'],
+    ['source', 'expectedSha256', 'oldSchema', 'newSchema', 'elementMaps', 'outputDirectory'],
     'file migration request',
   );
   check(
@@ -339,6 +390,7 @@ export function writeSaveLayoutMigration(options) {
       expectedSha256: options.expectedSha256,
       oldSchema: options.oldSchema,
       newSchema: options.newSchema,
+      elementMaps: options.elementMaps,
     });
     unchanged();
     fs.mkdirSync(outputDirectory, { mode: 0o700 });

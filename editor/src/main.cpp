@@ -38,6 +38,14 @@ int main(int argc, char **argv) {
     }
     if (render && !mcp && !requestGpu && qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM"))
         qputenv("QT_QPA_PLATFORM", "offscreen");
+#if defined(Q_OS_LINUX)
+    // The native preview hosts the emulator's X11 Vulkan surface. Keep both
+    // windows on X11/XWayland, without overriding explicit platform choices
+    // or changing headless MCP/render invocations.
+    if (!mcp && !render && qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM") &&
+        !qEnvironmentVariableIsEmpty("DISPLAY"))
+        qputenv("QT_QPA_PLATFORM", "xcb");
+#endif
     std::unique_ptr<QCoreApplication> app;
     if (mcp)
         app = std::make_unique<QCoreApplication>(argc, argv);
@@ -58,6 +66,8 @@ int main(int argc, char **argv) {
                       "Companion inner geometry IGZ (preferred; avoids Qt's native --geometry option).",
                       "path"});
     parser.addOption({"smoke-test", "Show the GUI briefly, then exit (for offscreen startup verification)."});
+    parser.addOption(
+        {"play", "Open the selected document and start its configured native preview after loading."});
     parser.addOption({"render-scene",
                       "Render the actual scene viewport to a NEW 1280x800 PNG, print JSON provenance, then "
                       "exit. Defaults to offscreen; no game process.",
@@ -93,10 +103,10 @@ int main(int argc, char **argv) {
     parser.addOption({"uv-channel",
                       "Diagnostic stored TEXCOORD channel 0..7; not an inferred shader mapping.", "channel",
                       "0"});
-    parser.addOption(
-        {"camera-json",
-         "Capture camera JSON with pivot[3], yawRadians, pitchRadians and distance; overrides auto framing.",
-         "json"});
+    parser.addOption({"camera-json",
+                      "Initial desktop or capture camera: pivot[3], yawRadians, pitchRadians and distance; "
+                      "overrides auto framing.",
+                      "json"});
     parser.addOption({"lighting-json",
                       "Capture editor light rig: direction[3], ambient[3], keyColor[3], intensity, exposure, "
                       "twoSided. Not native game lighting.",
@@ -135,13 +145,16 @@ int main(int argc, char **argv) {
         return 2;
     }
     const BackendConfig config{parser.value("node"), QFileInfo(parser.value("backend")).absoluteFilePath()};
-    for (const auto &option :
-         {"view-mode", "mesh-key", "texture-image", "texture-size", "uv-channel", "camera-json",
-          "lighting-json", "no-overlays", "isolate-selection", "expected-sha256"})
+    for (const auto &option : {"view-mode", "mesh-key", "texture-image", "texture-size", "uv-channel",
+                               "lighting-json", "no-overlays", "isolate-selection", "expected-sha256"})
         if (parser.isSet(option) && !parser.isSet("render-scene")) {
             std::fprintf(stderr, "--%s requires --render-scene\n", option);
             return 2;
         }
+    if (parser.isSet("camera-json") && (mcp || parser.positionalArguments().size() != 1)) {
+        std::fprintf(stderr, "--camera-json requires one level file and cannot combine with --mcp\n");
+        return 2;
+    }
     if (parser.isSet("render-scene")) {
         if (mcp || parser.isSet("smoke-test") || parser.positionalArguments().size() != 1) {
             std::fprintf(
@@ -337,7 +350,23 @@ int main(int argc, char **argv) {
     }
     if (mcp)
         return runMcp(config);
+    if (parser.isSet("play") && (parser.positionalArguments().size() != 1 || parser.isSet("smoke-test"))) {
+        std::fprintf(stderr, "--play requires one document in normal GUI mode\n");
+        return 2;
+    }
     EditorWindow window(config);
+    if (parser.isSet("play"))
+        window.playWhenLoaded();
+    if (parser.isSet("camera-json")) {
+        QJsonParseError error;
+        const auto camera = QJsonDocument::fromJson(parser.value("camera-json").toUtf8(), &error);
+        if (error.error != QJsonParseError::NoError || !camera.isObject() ||
+            !window.setInitialCamera(camera.object())) {
+            std::fprintf(stderr, "Invalid --camera-json; expected finite bounded pivot, yawRadians, "
+                                 "pitchRadians and distance\n");
+            return 2;
+        }
+    }
     window.show();
     if (!parser.positionalArguments().isEmpty()) {
         const auto path = parser.positionalArguments().first();

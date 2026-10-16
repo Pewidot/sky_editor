@@ -1,6 +1,7 @@
 #include "sceneview.h"
 #include "gpurenderer.h"
 #include <QGuiApplication>
+#include <QMatrix4x4>
 
 #include <QCryptographicHash>
 #include <QFocusEvent>
@@ -258,6 +259,10 @@ bool SceneView::project(QVector3D world, QPointF &screen, float *depth) const {
 }
 
 void SceneView::setScene(const QJsonObject &scene) {
+    transforms_.clear();
+    sourceTransforms_.clear();
+    for (const auto &o : scene.value("objects").toArray())
+        sourceTransforms_[o.toObject().value("id").toInteger()] = o.toObject();
     gpu_.reset();
     usedGpu_ = false;
     actors_.clear();
@@ -440,6 +445,42 @@ void SceneView::setEdits(const QMap<qint64, QJsonArray> &edits) {
     edits_ = edits;
     changed();
 }
+
+namespace {
+QMatrix4x4 objectMatrix(const QJsonObject &o) {
+    const auto r = o.value("rotationDegrees").toArray(QJsonArray{0, 0, 0}),
+               s = o.value("scale").toArray(QJsonArray{1, 1, 1});
+    QMatrix4x4 m;
+    m.rotate(r[1].toDouble(), 0, 1, 0);
+    m.rotate(-r[0].toDouble(), 1, 0, 0);
+    m.rotate(r[2].toDouble(), 0, 0, 1);
+    m.scale(s[0].toDouble(), s[1].toDouble(), s[2].toDouble());
+    return m;
+}
+} // namespace
+void SceneView::setTransforms(const QMap<qint64, QJsonObject> &transforms) {
+    if (transforms_ == transforms)
+        return;
+    transforms_ = transforms;
+    for (auto &m : meshes_) {
+        if (m.actorId < 0)
+            continue;
+        if (m.originalVertices.empty()) {
+            m.originalVertices = m.vertices;
+            m.originalNormals = m.normals;
+        }
+        const auto original = sourceTransforms_.value(m.actorId);
+        const auto matrix =
+            objectMatrix(transforms_.value(m.actorId, original)) * objectMatrix(original).inverted();
+        const auto normal = matrix.inverted().transposed();
+        for (size_t i = 0; i < m.vertices.size(); ++i)
+            m.vertices[i] = matrix.map(m.originalVertices[i] - m.actorBasePosition) + m.actorBasePosition;
+        for (size_t i = 0; i < m.normals.size(); ++i)
+            m.normals[i] = normal.mapVector(m.originalNormals[i]).normalized();
+    }
+    gpu_.reset();
+    changed();
+}
 void SceneView::setSelected(qint64 id) {
     selected_ = id;
     if (id >= 0)
@@ -569,14 +610,14 @@ void SceneView::setCollisions(const QJsonArray &actors) {
             continue;
         const auto dimensions = vector(actor.value("dimensionsWorld").toArray());
         const auto rotation = vector(actor.value("rotationDegrees").toArray());
-        if (dimensions.x() <= 0 || dimensions.y() <= 0 || dimensions.z() <= 0 || rotation.x() != 0 ||
-            rotation.z() != 0 || std::abs(rotation.y()) > 360)
+        if (dimensions.x() <= 0 || dimensions.y() <= 0 || dimensions.z() <= 0)
             continue;
         const auto id = actor.value("actorId").toInteger(-1);
         if (id < 0)
             continue;
         collisionBoxes_.insert(id, {id, vector(actor.value("position").toArray()),
-                                    vector(actor.value("offsetWorld").toArray()), dimensions, rotation.y()});
+                                    vector(actor.value("offsetWorld").toArray()), dimensions, rotation,
+                                    vector(actor.value("scale").toArray(QJsonArray{1, 1, 1}))});
     }
     changed();
 }
@@ -586,15 +627,17 @@ QVector<QVector3D> SceneView::collisionBoxCorners(qint64 actorId) const {
         return {};
     const auto &box = found.value();
     const auto base = edits_.contains(actorId) ? vector(edits_.value(actorId)) : box.position;
-    const float angle = box.yaw * (pi / 180.f), sine = std::sin(angle), cosine = std::cos(angle);
+    const auto matrix = objectMatrix(transforms_.value(
+        actorId,
+        QJsonObject{{"rotationDegrees", QJsonArray{box.rotation.x(), box.rotation.y(), box.rotation.z()}},
+                    {"scale", QJsonArray{box.scale.x(), box.scale.y(), box.scale.z()}}}));
     QVector<QVector3D> corners;
     for (int i = 0; i < 8; ++i) {
         // Width/length centered on local X/Z; Y starts at the box base.
         const QVector3D local = box.offset + QVector3D((i & 1 ? .5f : -.5f) * box.dimensions.x(),
                                                        (i & 2 ? 1.f : 0.f) * box.dimensions.y(),
                                                        (i & 4 ? .5f : -.5f) * box.dimensions.z());
-        corners.append(base + QVector3D(cosine * local.x() + sine * local.z(), local.y(),
-                                        -sine * local.x() + cosine * local.z()));
+        corners.append(base + matrix.mapVector(local));
     }
     return corners;
 }
@@ -1144,33 +1187,7 @@ void SceneView::paintEvent(QPaintEvent *) {
     if (!showOverlays_)
         return;
     painter.setRenderHint(QPainter::Antialiasing);
-    // Keep navigation help and scene counts readable over pale map surfaces.
-    painter.fillRect(QRect(0, 0, width(), 28), QColor(19, 25, 31, 210));
-    painter.fillRect(QRect(0, height() - 29, width(), 29), QColor(19, 25, 31, 210));
-    painter.setPen(QColor("#c9d6df"));
-    painter.drawText(
-        12, 20,
-        QString("PERSPECTIVE  ·  %1 actors (%2 models / %3 proxies)  ·  %4 meshes  ·  sky %5%6")
-            .arg(actors_.size())
-            .arg(modeledActors_.size())
-            .arg(actors_.size() - modeledActors_.size())
-            .arg(meshes_.size())
-            .arg(showSky_ ? "visible" : "hidden")
-            .arg((usedGpu_ ? "  ·  OpenGL" : "  ·  CPU") +
-                 (showCollisions_
-                      ? QString("  ·  %1 eligible boxes (x-ray, partial)").arg(collisionBoxes_.size())
-                      : QString{})));
-    painter.setPen(QColor("#9dafbb"));
-    painter.drawText(
-        12, height() - 12,
-        QString(
-            "MMB orbit | RMB + WASD/QE fly | F frame | snap %1 (%2) | world grid %3 | RGB textures %4/%5%6")
-            .arg(snap_ ? "on" : "off")
-            .arg(grid_)
-            .arg(worldGrid().spacing)
-            .arg(showTextures_ ? texturedMeshCount() : 0)
-            .arg(meshes_.size())
-            .arg(showTextures_ ? " (preview)" : " (off)"));
+    // Navigation help belongs in the viewport tooltip, not over the map.
     const auto *actor = selectedActor();
     if (actor) {
         QPointF origin;
@@ -1205,9 +1222,7 @@ void SceneView::paintEvent(QPaintEvent *) {
     }
     if (actors_.empty() && meshes_.empty()) {
         painter.setPen(QColor("#b7c6d2"));
-        painter.drawText(rect(), Qt::AlignCenter,
-                         "Open a level to load its 3D scene.\nLoad a companion geometry IGZ to show decoded "
-                         "map triangles.");
+        painter.drawText(rect(), Qt::AlignCenter, "No level open");
     }
 }
 void SceneView::resizeEvent(QResizeEvent *) { changed(); }

@@ -99,7 +99,7 @@ test(
     assert.equal(rebuiltRows.splice(86, 1)[0], BigInt(r.manifest.insertion.opcodeEncoded));
     assert.deepEqual(rebuiltRows, originalRows);
     assert.deepEqual(
-      r.manifest.scalarEdits.map((e) => [e.originalObjectIndex, e.before, e.after]),
+      r.manifest.scalarEdits.slice(-4).map((e) => [e.originalObjectIndex, e.before, e.after]),
       [
         [649, 623, 624],
         [651, 618, 619],
@@ -107,6 +107,37 @@ test(
         [757, 18, 19],
       ],
     );
+    assert.deepEqual(
+      r.manifest.expansionVillainIndices.map((e) => [e.before, e.after]),
+      [
+        [18, 19],
+        [19, 20],
+        [20, 21],
+        [21, 22],
+      ],
+    );
+    for (const [parameterId, rhsId, stackId, value] of [
+      [1010, 1011, 1012, 18],
+      [1016, 1017, 1018, 19],
+      [1022, 1023, 1024, 20],
+      [1031, 1032, 1033, 21],
+    ]) {
+      const parameter = objectAt(next, before.objects[parameterId].encoded);
+      const newRhs =
+        next.objects[next.pointerReferencesByOffset.get(parameter.offset + 96).targetObjectIndex];
+      const newStack = next.objects[next.pointerReferencesByOffset.get(newRhs.offset + 16).targetObjectIndex];
+      assert.equal(next.u32(newStack.offset + 64), value + 1);
+      assert.equal(next.u32(objectAt(next, before.objects[stackId].encoded).offset + 64), value);
+      for (const o of [newRhs, newStack]) {
+        assert.equal(next.u32(o.offset + 8), 1);
+        assert.equal(next.pointerReferences.filter((p) => p.targetObjectIndex === o.index).length, 1);
+      }
+      const oldRhs = objectAt(next, before.objects[rhsId].encoded);
+      assert.equal(
+        next.u32(oldRhs.offset + 8),
+        next.pointerReferences.filter((p) => p.targetObjectIndex === oldRhs.index).length,
+      );
+    }
     assert.deepEqual(
       r.manifest.binding.rebuilt.map((d) => d.row),
       [5, 299, 310, 326, 349, 362, 393, 438, 495, 597],

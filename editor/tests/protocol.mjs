@@ -162,6 +162,7 @@ assert.equal(byId.get(1).result.protocolVersion, '2025-03-26');
 assert.deepEqual(
   byId.get(2).result.tools.map((tool) => tool.name),
   [
+    'import_glb',
     'inspect_level',
     'list_level_objects',
     'inspect_level_scene',

@@ -340,20 +340,62 @@ export function createStoryRegistrationDraft(options) {
     'Pinned title external reference mismatch',
   );
   const external = { nameId: pair.title.nameId, namespaceHash: pair.title.namespaceHash };
-  const payload = Buffer.alloc(136);
+  const villainIndices = [
+    [1010, 1011, 1012, 18],
+    [1016, 1017, 1018, 19],
+    [1022, 1023, 1024, 20],
+    [1031, 1032, 1033, 21],
+  ];
+  const payload = Buffer.alloc(144 + villainIndices.length * 128);
   options.initializer.copy(payload, 0, opcode.offset, opcode.offset + opcode.size);
   options.initializer.copy(payload, 80, group.offset, group.offset + group.size);
   payload.writeBigUInt64LE(BigInt(target.appendOffset + 80), 72);
   payload.writeBigUInt64LE(BigInt(target.appendOffset + 128), 80 + 32);
   payload.writeBigUInt64LE(0x8000000000000000n | BigInt(target.externalIdCount), 128);
+  const appendedObjects = [
+    { offset: 0, type: opcode.type },
+    { offset: 80, type: group.type },
+  ];
+  const fixupSlots = { RSTT: [16], ROFS: [56, 72, 112], RNEX: [120], REXT: [128], RPID: [] };
+  for (const [i, [parameterId, rhsId, stackId, previous]] of villainIndices.entries()) {
+    const parameter = z.objects[parameterId],
+      rhs = z.objects[rhsId],
+      stack = z.objects[stackId],
+      offset = 144 + i * 128;
+    check(
+      parameter.type === 'OpMacroParameter' &&
+        rhs.type === 'ValueRHSVariant' &&
+        rhs.size === 56 &&
+        stack.type === 'RHSValueStack' &&
+        stack.size === 72,
+      'Pinned expansion villain operand types',
+    );
+    check(
+      z.pointerReferencesByOffset.get(parameter.offset + 96)?.targetObjectIndex === rhsId &&
+        z.pointerReferencesByOffset.get(rhs.offset + 16)?.targetObjectIndex === stackId &&
+        z.u32(stack.offset + 64) === previous,
+      'Pinned expansion villain index mismatch',
+    );
+    check(
+      z.u32(rhs.offset + 8) === z.pointerReferences.filter((p) => p.targetObjectIndex === rhsId).length,
+      'Shared villain RHS ownership mismatch',
+    );
+    options.initializer.copy(payload, offset, rhs.offset, rhs.offset + 56);
+    options.initializer.copy(payload, offset + 56, stack.offset, stack.offset + 72);
+    payload.writeUInt32LE(1, offset + 8);
+    payload.writeUInt32LE(1, offset + 56 + 8);
+    payload.writeBigUInt64LE(BigInt(target.appendOffset + offset + 56), offset + 16);
+    payload.writeUInt32LE(previous + 1, offset + 56 + 64);
+    appendedObjects.push({ offset, type: rhs.type }, { offset: offset + 56, type: stack.type });
+    fixupSlots.ROFS.push(offset + 16);
+    fixupSlots.RPID.push(offset + 56 + 24);
+    fixupSlots.RNEX.push(offset + 56 + 56);
+  }
   const appended = appendIgz(options.initializer, {
     expectedSha256: expectedHashes.initializer,
     appendedDefaultPool: payload,
-    appendedObjects: [
-      { offset: 0, type: opcode.type },
-      { offset: 80, type: group.type },
-    ],
-    fixupSlots: { RSTT: [16], ROFS: [56, 72, 112], RNEX: [120], REXT: [128] },
+    appendedObjects,
+    fixupSlots,
     newExternalIds: [external],
     objectLists: [
       { listEncoded: code.encoded, expectedType: 'OpCodeList', insertAt: 86, appendObjects: [0] },
@@ -362,6 +404,35 @@ export function createStoryRegistrationDraft(options) {
   const buffer = Buffer.from(appended.buffer),
     prepatch = parseIgz(buffer),
     edits = [];
+  for (const [i, [parameterId, rhsId, , previous]] of villainIndices.entries()) {
+    const parameter = byEncoded(prepatch, z.objects[parameterId].encoded),
+      rhs = byEncoded(prepatch, z.objects[rhsId].encoded);
+    buffer.writeBigUInt64LE(BigInt(target.appendOffset + 144 + i * 128), parameter.offset + 96);
+    const count = prepatch.u32(rhs.offset + 8);
+    buffer.writeUInt32LE(count - 1, rhs.offset + 8);
+    edits.push(
+      {
+        originalObjectIndex: parameterId,
+        encoded: parameter.encoded,
+        fieldOffset: 96,
+        fileOffset: parameter.offset + 96,
+        width: 8,
+        before: rhs.encoded,
+        after: target.appendOffset + 144 + i * 128,
+        reason: `Expansion villain adventure index ${previous} -> ${previous + 1}, cloned shared operand`,
+      },
+      {
+        originalObjectIndex: rhsId,
+        encoded: rhs.encoded,
+        fieldOffset: 8,
+        fileOffset: rhs.offset + 8,
+        width: 4,
+        before: count,
+        after: count - 1,
+        reason: 'Redirected one owning index operand',
+      },
+    );
+  }
   for (const [objectIndex, fieldOffset, width, before, after, reason] of [
     [649, 50, 2, 623, 624, 'PRESCRIPT crossing span'],
     [651, 50, 2, 618, 619, 'MACROS crossing span'],
@@ -489,9 +560,15 @@ export function createStoryRegistrationDraft(options) {
         groupStackEncoded: target.appendOffset + 80,
         externalIndex: 580,
         externalHandle: external,
-        externalRawHex: payload.subarray(128).toString('hex'),
+        externalRawHex: payload.subarray(128, 136).toString('hex'),
         originalRowsPreserved: true,
       },
+      expansionVillainIndices: villainIndices.map(([parameterId, , , before]) => ({
+        parameterId,
+        before,
+        after: before + 1,
+        sharedLiteralPreserved: true,
+      })),
       ownership: {
         sharedLhsEncoded: lhs.encoded,
         previousSerializedCount: 18,

@@ -92,6 +92,12 @@ export class PortalController {
     this.outputStreams = Object.fromEntries(
       ['stdout', 'stderr'].map((stream) => [stream, { decoder: new StringDecoder('utf8'), pending: '' }]),
     );
+    this.startupMilestones = [];
+    this.startupKeys = new Set();
+    this.nativeCamera = null;
+    this.cameraBusy = false;
+    this.cameraOperation = null;
+    this.cameraStopping = false;
   }
   start({ emulator, game, session, x11 = false, resumeFrom }) {
     check(!this.child, 'This controller has already launched a session');
@@ -113,7 +119,9 @@ export class PortalController {
       fs.mkdirSync(path.join(session, dir), { recursive: true, mode: 0o700 });
     const configPath = path.join(session, 'user/config.json');
     const config = checkpoint ? JSON.parse(fs.readFileSync(configPath, 'utf8')) : {};
-    config.Input = { ...config.Input, usb_device_backend: 1 };
+    // SDL's render window is embedded below a Qt input surface. Physical pads
+    // must continue reaching the owned emulator while the editor has focus.
+    config.Input = { ...config.Input, usb_device_backend: 1, background_controller_input: true };
     config.General = {
       ...config.General,
       connected_to_network: false,
@@ -138,11 +146,13 @@ export class PortalController {
       mode: 0o600,
     });
     this.session = session;
+    this.launchIdentity = { emulator, game };
     this.sessionRoot = fs.realpathSync(session);
     this.checkpointFigures = checkpoint?.figures ?? [];
     this.logFd = fs.openSync(path.join(session, 'emulator.log'), 'wx', 0o600);
     this.auditFd = fs.openSync(path.join(session, 'portal-events.jsonl'), 'wx', 0o600);
     const args = ['--ignore-game-patch', '--fullscreen', 'false', '--game', game];
+    this.spawnStartedAt = performance.now();
     this.child = spawn(emulator, args, {
       cwd: session,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -209,6 +219,13 @@ export class PortalController {
     if (state.pending.length > 65536) state.pending = ''; // Do not retain unbounded malformed log lines.
   }
   outputLine(line, stream) {
+    // Times are log-receipt observations, not frame-ready acknowledgments.
+    // Retain only bounded, relevant file-open milestones, never every log line.
+    const opened =
+      /\[Kernel\.Fs\].*open: path = \/app0\/((?:permanent|level|movies|renderer)\/[A-Za-z0-9_.-]+) flags = /.exec(
+        line,
+      );
+    if (opened) this.noteStartup('game-file-open', opened[1]);
     if (stream === 'stderr' && !this.handshake) {
       if (line === ';#IPC_ENABLED') this.advertised = new Set();
       else if (this.advertised && [';ENABLE_INPUT_PULSE_V1', ';ENABLE_CAPTURE_GAME_FRAME_V1'].includes(line))
@@ -217,6 +234,7 @@ export class PortalController {
         this.capabilities.inputPulse = this.advertised.has(';ENABLE_INPUT_PULSE_V1');
         this.capabilities.captureGameFrame = this.advertised.has(';ENABLE_CAPTURE_GAME_FRAME_V1');
         this.handshake = true;
+        this.noteStartup('ipc-handshake');
         try {
           this.send('RUN\nSTART\n');
         } catch (error) {
@@ -228,6 +246,7 @@ export class PortalController {
     if (/\[Core\.Linker\].*Execute: Can't Load libSceLibcInternal/.test(line)) this.postHleSeen = true;
     if (!this.stopRequested && !this.ready && this.handshake && this.supportedVersion && this.postHleSeen) {
       this.ready = true;
+      this.noteStartup('hle-ready');
       for (const figure of this.checkpointFigures ?? []) {
         try {
           this.insert({ slot: figure.slot, file: path.join(this.session, figure.path) });
@@ -328,6 +347,7 @@ export class PortalController {
     return this.performInput(args);
   }
   async performInput(args) {
+    check(!this.cameraBusy && !this.cameraStopping, 'Wait for the native camera request');
     this.requireCapability('inputPulse');
     validateInput(args);
     const { kind, name, durationMs } = args;
@@ -350,6 +370,7 @@ export class PortalController {
     };
   }
   async sequence({ steps, intervalMs = 1000 }) {
+    check(!this.cameraBusy && !this.cameraStopping, 'Wait for the native camera request');
     this.requireCapability('inputPulse');
     check(!this.sequenceAbort, 'Only one input sequence may run');
     check(Array.isArray(steps) && steps.length >= 1 && steps.length <= 30, 'steps must contain 1..30 inputs');
@@ -524,6 +545,7 @@ export class PortalController {
     }
   }
   async capture({ timeoutMs = 10000 } = {}) {
+    check(!this.cameraBusy && !this.cameraStopping, 'Wait for the native camera request');
     this.requireCapability('captureGameFrame');
     check(
       Number.isInteger(timeoutMs) && timeoutMs >= 250 && timeoutMs <= 30000,
@@ -598,6 +620,19 @@ export class PortalController {
       this.failure = 'Portal audit write failed: ' + error.message;
     }
   }
+  noteStartup(stage, file) {
+    if (this.spawnStartedAt === undefined || this.startupMilestones.length >= 128) return;
+    const key = stage + ':' + (file ?? '');
+    if (this.startupKeys.has(key)) return;
+    this.startupKeys.add(key);
+    const milestone = {
+      stage,
+      ...(file === undefined ? {} : { file }),
+      elapsedMs: performance.now() - this.spawnStartedAt,
+    };
+    this.startupMilestones.push(milestone);
+    this.record('startup-milestone', milestone);
+  }
   send(text) {
     check(this.alive && this.child?.stdin.writable, 'Emulator is not running');
     this.child.stdin.write(text);
@@ -613,12 +648,18 @@ export class PortalController {
       uncertainInputRequestIds: [...this.uncertainInputs],
       captureUncertain: this.captureUncertain,
       sequenceRunning: !!this.sequenceAbort,
+      startup: {
+        milestones: this.startupMilestones.map((entry) => ({ ...entry })),
+        limitation:
+          'Monotonic time since process spawn to log receipt; file open and HLE readiness do not prove playable gameplay.',
+      },
       readinessEvidence: this.ready
         ? 'v0.19 post-HLE linker log; not a game recognition acknowledgment'
         : null,
       slots: this.slots,
       exit: this.exit,
       failure: this.failure,
+      nativeCamera: this.cameraStatus(),
       limitation:
         'Slot state tracks commands sent, not acknowledgments. Confirm recognition and swaps in the game. Portal speaker audio is not implemented by this controller.',
     };
@@ -678,6 +719,69 @@ export class PortalController {
     if (this.slots[slot]) await this.remove({ slot });
     return this.insert({ slot, file });
   }
+  cameraStatus() {
+    return {
+      available: !!(
+        this.alive &&
+        this.ready &&
+        this.capabilities.captureGameFrame &&
+        !this.stopRequested &&
+        !this.cameraStopping
+      ),
+      validated: this.nativeCamera?.validated === true,
+      busy: this.cameraBusy,
+      ...(this.nativeCamera?.status() ?? { enabled: false, remainingMs: 0, experimental: true }),
+      maximumLeaseMs: 30000,
+      maximumTravel: null,
+      maximumStep: 5,
+      limitation:
+        'Experimental exact-build native camera; validation occurs on first use. Snapshot display is not live video. No collision, distant-streaming, or FOV guarantee.',
+    };
+  }
+  async cameraAction(method, args) {
+    this.requireCapability('captureGameFrame');
+    check(
+      !this.cameraBusy && !this.cameraStopping,
+      'A native camera operation is already running or stopping',
+    );
+    check(
+      !this.sequenceAbort &&
+        !this.captureBusy &&
+        this.replies.size === 0 &&
+        (method === 'disable' || (this.uncertainInputs.size === 0 && !this.captureUncertain)),
+      'Wait for input/capture completion before changing the native camera',
+    );
+    this.cameraBusy = true;
+    this.cameraOperation = (async () => {
+      if (!this.nativeCamera) {
+        const { OwnedNativeCamera } = await import('./native_camera_control.mjs');
+        this.nativeCamera = new OwnedNativeCamera(this, this.launchIdentity);
+      }
+      return await this.nativeCamera[method](args);
+    })();
+    try {
+      await this.cameraOperation;
+    } finally {
+      this.cameraBusy = false;
+      this.cameraOperation = null;
+    }
+    return this.cameraStatus();
+  }
+  cameraEnable(args = {}) {
+    return this.cameraAction('enable', args);
+  }
+  cameraMove(args = {}) {
+    return this.cameraAction('step', args);
+  }
+  cameraRenew(args = {}) {
+    return this.cameraAction('renew', args);
+  }
+  cameraUi(args = {}) {
+    return this.cameraAction('setUiHidden', args);
+  }
+  cameraDisable() {
+    return this.cameraAction('disable', 'requested');
+  }
   stop() {
     if (this.stopping) return this.stopping;
     this.stopping = this.stopOwned().finally(() => {
@@ -688,6 +792,21 @@ export class PortalController {
   async stopOwned() {
     this.cancelSequence();
     if (!this.alive) return this.status();
+    // Restoration must run while ready/ownership checks still describe the
+    // live child. No new input/camera work can begin during this phase.
+    this.cameraStopping = true;
+    try {
+      await this.cameraOperation;
+    } catch {
+      /* teardown still owns the child */
+    }
+    if (this.nativeCamera?.status().enabled && !this.nativeCamera.lastFault) {
+      try {
+        await this.nativeCamera.disable('controller-stop');
+      } catch (error) {
+        this.failure = 'Native camera restore failed; stopping owned emulator: ' + error.message;
+      }
+    }
     this.stopRequested = true;
     this.ready = false;
     this.rejectReplies('Owned emulator is stopping');
@@ -775,6 +894,20 @@ const schemas = {
     intervalMs: { type: 'integer', minimum: 100, maximum: 2000 },
   },
   portal_cancel_sequence: {},
+  portal_camera_enable: {
+    durationMs: { type: 'integer', minimum: 1000, maximum: 30000 },
+    hideUi: { type: 'boolean' },
+  },
+  portal_camera_renew: { durationMs: { type: 'integer', minimum: 1000, maximum: 30000 } },
+  portal_camera_move: Object.fromEntries(
+    ['right', 'up', 'forward', 'yaw', 'pitch'].map((name) => {
+      const limit = ['yaw', 'pitch'].includes(name) ? 45 : 5;
+      return [name, { type: 'number', minimum: -limit, maximum: limit }];
+    }),
+  ),
+  portal_camera_disable: {},
+  portal_camera_status: {},
+  portal_camera_ui: { hidden: { type: 'boolean' } },
 };
 const required = {
   portal_start: ['emulator', 'game', 'session'],
@@ -785,6 +918,7 @@ const required = {
   portal_checkpoint: ['output'],
   portal_input: ['kind', 'name', 'durationMs'],
   portal_sequence: ['steps'],
+  portal_camera_ui: ['hidden'],
 };
 const methods = {
   portal_start: 'start',
@@ -799,6 +933,12 @@ const methods = {
   portal_capture: 'capture',
   portal_sequence: 'sequence',
   portal_cancel_sequence: 'cancelSequence',
+  portal_camera_enable: 'cameraEnable',
+  portal_camera_move: 'cameraMove',
+  portal_camera_renew: 'cameraRenew',
+  portal_camera_disable: 'cameraDisable',
+  portal_camera_status: 'cameraStatus',
+  portal_camera_ui: 'cameraUi',
 };
 const descriptions = {
   portal_start:
@@ -811,6 +951,18 @@ const descriptions = {
     'Fork only: up to 30 bounded inputs, scheduled locally (default one per second), without screenshots or client round trips between steps. No loading-screen detection. Inspect a frame at route boundaries.',
   portal_cancel_sequence:
     'Cancel remaining steps immediately, including while a sequence RPC is running. A pressed pulse still receives its bounded release.',
+  portal_camera_enable:
+    'Experimental exact-build native camera: hold the currently bound game camera for 1..30 seconds (default 15). Owned child only, source/identity validation, automatic restore. No game-file patches.',
+  portal_camera_renew:
+    'Renew an active native camera watchdog for 1..30 seconds (default 8). Revalidates the owned binding without moving the camera or changing restoration state. No heartbeat means automatic restoration.',
+  portal_camera_move:
+    'Move the held native camera in local right/up/forward game units (combined maximum 5 per request, 50 from start) and yaw/pitch degrees (maximum 45). Native projection retained. Capture a fresh frame after completion.',
+  portal_camera_disable:
+    'Restore the original native camera pose and updater. Stop also restores before terminating the owned emulator.',
+  portal_camera_status:
+    'Read camera lease status/bounds without accessing process memory. Availability is not exact-build validation.',
+  portal_camera_ui:
+    'Experimental: hide or restore the original sprite UI during an active camera lease. May hide all HUD/prompts. One validated viewer byte; restored with camera on disable/expiry/stop.',
 };
 export async function serve() {
   const portal = new PortalController();
@@ -866,9 +1018,11 @@ export async function serve() {
           check(
             schema.type === 'integer'
               ? Number.isInteger(value) && value >= schema.minimum && value <= schema.maximum
-              : schema.type === 'array'
-                ? Array.isArray(value) && value.length >= schema.minItems && value.length <= schema.maxItems
-                : typeof value === schema.type,
+              : schema.type === 'number'
+                ? Number.isFinite(value) && value >= schema.minimum && value <= schema.maximum
+                : schema.type === 'array'
+                  ? Array.isArray(value) && value.length >= schema.minItems && value.length <= schema.maxItems
+                  : typeof value === schema.type,
             `Invalid argument type or range: ${key}`,
           );
           check(!schema.enum || schema.enum.includes(value), `Invalid argument value: ${key}`);
@@ -910,8 +1064,7 @@ export async function serve() {
     cancelQueued ||= cancel;
     portal.cancelSequence();
     if (cancel) {
-      portal.stopRequested = true;
-      portal.ready = false;
+      portal.cameraStopping = true;
       portal.rejectReplies('Controller disconnected or is shutting down');
     }
     // Serialize teardown after the in-flight operation. Otherwise a queued
@@ -943,7 +1096,7 @@ export async function serve() {
       try {
         const r = JSON.parse(line);
         const name = r?.method === 'tools/call' ? r.params?.name : r?.operation;
-        immediate = ['portal_cancel_sequence', 'portal_status'].includes(name);
+        immediate = ['portal_cancel_sequence', 'portal_status', 'portal_camera_status'].includes(name);
         const args = r?.method === 'tools/call' ? (r.params?.arguments ?? {}) : (r?.arguments ?? {});
         // Teardown remains serialized, but a valid stop must prevent later
         // route steps now, not after the entire sequence has finished.

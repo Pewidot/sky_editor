@@ -1,5 +1,7 @@
 #include "window.h"
+#include "nativegameview.h"
 #include "portaldialog.h"
+#include "previewlaunch.h"
 #include "sceneview.h"
 
 #include <QCheckBox>
@@ -23,8 +25,10 @@
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QPlainTextEdit>
+#include <QProgressBar>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QSettings>
 #include <QSignalBlocker>
 #include <QSplitter>
 #include <QStatusBar>
@@ -32,6 +36,8 @@
 #include <QTabWidget>
 #include <QTableWidget>
 #include <QTimer>
+#include <QToolBar>
+#include <QToolButton>
 #include <QVBoxLayout>
 #include <cmath>
 
@@ -39,6 +45,10 @@ EditorWindow::EditorWindow(BackendConfig config) : config_(std::move(config)) {
     setWindowTitle("Trap Team · Level Workshop");
     resize(1480, 940);
     setDockNestingEnabled(true);
+    setDockOptions(AllowNestedDocks | AllowTabbedDocks | AnimatedDocks);
+    setTabPosition(Qt::AllDockWidgetAreas, QTabWidget::North);
+    setCorner(Qt::TopLeftCorner, Qt::LeftDockWidgetArea);
+    setCorner(Qt::TopRightCorner, Qt::RightDockWidgetArea);
     setStyleSheet(R"CSS(
         QMainWindow, QDialog { background: #161b22; color: #dce4ef; }
         QWidget { background: #1b2430; color: #dce4ef; font-size: 12px; }
@@ -53,8 +63,8 @@ EditorWindow::EditorWindow(BackendConfig config) : config_(std::move(config)) {
         QPushButton:hover { background: #35475e; border-color: #6486af; }
         QPushButton:pressed { background: #1d2a3c; }
         QPushButton:disabled { color: #677588; background: #202833; border-color: #2b3543; }
-        QPushButton#primaryBuild, QPushButton#stagePosition { background: #2763a4; border-color: #458de0; color: white; }
-        QPushButton#primaryBuild:hover, QPushButton#stagePosition:hover { background: #337ac4; }
+        QPushButton#stagePosition, QPushButton#playCurrentMap { background: #2763a4; border-color: #458de0; color: white; }
+        QPushButton#stagePosition:hover, QPushButton#playCurrentMap:hover { background: #337ac4; }
         QLineEdit, QComboBox, QDoubleSpinBox, QSpinBox, QPlainTextEdit { background: #151d27; border: 1px solid #354356;
             border-radius: 4px; padding: 5px; selection-background-color: #315e91; color: #dce4ef; }
         QLineEdit:focus, QComboBox:focus, QDoubleSpinBox:focus { border-color: #5b9ce8; }
@@ -80,32 +90,49 @@ EditorWindow::EditorWindow(BackendConfig config) : config_(std::move(config)) {
     auto *layout = new QVBoxLayout(central);
     layout->setContentsMargins(8, 6, 8, 6);
     layout->setSpacing(6);
-    auto *toolbar = new QHBoxLayout;
-    auto *brand = new QLabel("LEVEL WORKSHOP");
-    brand->setObjectName("brand");
-    toolbar->addWidget(brand);
-    open_ = new QPushButton("Open level…");
+    auto *tools = new QToolBar(this);
+    tools->setObjectName("mainTools");
+    tools->setMovable(false);
+    auto *toolPanel = new QWidget;
+    auto *toolbar = new QHBoxLayout(toolPanel);
+    toolbar->setContentsMargins(8, 4, 8, 4);
+    toolPanel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    open_ = new QPushButton("Open…");
     geometry_ = new QPushButton("Geometry…");
     build_ = new QPushButton("Build copy…");
     build_->setObjectName("primaryBuild");
+    play_ = new QPushButton("Play");
+    play_->setObjectName("playCurrentMap");
+    stopPreview_ = new QPushButton("Stop");
+    stopPreview_->setObjectName("stopGamePreview");
+    stopPreview_->setEnabled(false);
+    connect(stopPreview_, &QPushButton::clicked, this, [this] { stopPreview(); });
+    auto *importAction = menuBar()->addAction("Import GLB…");
+    importAction->setObjectName("importGlb");
+    connect(importAction, &QAction::triggered, this, [this] { importGlb(); });
+    play_->setIcon(style()->standardIcon(QStyle::SP_MediaPlay));
+    play_->setToolTip("Play the current map, including pending edits, in a private game copy.");
     open_->setIcon(style()->standardIcon(QStyle::SP_DirOpenIcon));
     build_->setIcon(style()->standardIcon(QStyle::SP_DialogSaveButton));
     toolbar->addWidget(open_);
     toolbar->addWidget(geometry_);
-    auto *portal = new QPushButton("Virtual portal…");
-    toolbar->addWidget(portal);
     toolbar->addStretch();
     toolbar->addWidget(build_);
-    layout->addLayout(toolbar);
+    toolbar->addWidget(play_);
+    tools->addWidget(toolPanel);
+    addToolBar(tools);
+    previewStatus_ = new QLabel;
+    previewStatus_->setObjectName("previewLaunchStatus");
+    previewStatus_->setTextFormat(Qt::PlainText);
+    previewStatus_->setMaximumWidth(480);
+    previewStatus_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    previewStatus_->hide();
+    statusBar()->addPermanentWidget(previewStatus_);
+    statusBar()->addPermanentWidget(stopPreview_);
     summary_ = new QLabel("Open the inner level.bld IGZ extracted from a game .bld archive.");
     summary_->setTextFormat(Qt::PlainText);
     summary_->setWordWrap(true);
     summary_->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    auto *notice =
-        new QLabel("3D placement editor · static map geometry is read-only · actors without decoded models "
-                   "use proxies · verified root actors have world-space move gizmos · test exports in game.");
-    notice->setWordWrap(true);
-    notice->setObjectName("mutedNotice");
     auto *filters = new QVBoxLayout;
     types_ = new QComboBox;
     types_->setObjectName("typeFilter");
@@ -120,8 +147,10 @@ EditorWindow::EditorWindow(BackendConfig config) : config_(std::move(config)) {
     filters->addWidget(query_);
     filters->addWidget(filter_);
     auto *viewControls = new QHBoxLayout;
-    auto *frameAll = new QPushButton("Frame map (Home)");
-    auto *frameSelected = new QPushButton("Frame selected (F)");
+    auto *frameAll = new QPushButton("Frame map");
+    frameAll->setToolTip("Frame map (Home)");
+    auto *frameSelected = new QPushButton("Frame selection");
+    frameSelected->setToolTip("Frame selection (F)");
     auto *snap = new QCheckBox("Snap");
     snap->setObjectName("snapEnabled");
     auto *grid = new QDoubleSpinBox;
@@ -132,7 +161,7 @@ EditorWindow::EditorWindow(BackendConfig config) : config_(std::move(config)) {
     auto *wireframe = new QCheckBox("Triangle edges");
     auto *sky = new QCheckBox("Sky geometry");
     skyToggle_ = sky;
-    auto *textures = new QCheckBox("RGB textures · preview");
+    auto *textures = new QCheckBox("Textures");
     textures->setObjectName("texturePreview");
     textures->setChecked(true);
     textures->setToolTip("Read-only 256px stored-mip color preview. Unsupported/layered materials stay flat. "
@@ -148,7 +177,7 @@ EditorWindow::EditorWindow(BackendConfig config) : config_(std::move(config)) {
     displayMode->setToolTip(
         "checker: 8 squares per raw UV unit. Magenta: missing UVs. missing: green decoded texture / magenta "
         "fallback. These modes are diagnostic, not the game shader.");
-    auto *overlays = new QCheckBox("World grid and editor overlays");
+    auto *overlays = new QCheckBox("Grid / overlays");
     overlays->setObjectName("sceneOverlays");
     overlays->setChecked(true);
     overlays->setToolTip(
@@ -160,7 +189,7 @@ EditorWindow::EditorWindow(BackendConfig config) : config_(std::move(config)) {
     viewControls->addWidget(new QLabel("Shading"));
     viewControls->addWidget(displayMode);
     auto *collisionControls = new QVBoxLayout;
-    collisionToggle_ = new QCheckBox("Collision boxes · x-ray preview (read-only)");
+    collisionToggle_ = new QCheckBox("Collision boxes");
     collisionToggle_->setObjectName("collisionOverlay");
     collisionToggle_->setToolTip(
         "Only structurally eligible actor BOX collisions; not static Havok terrain or complete collision "
@@ -192,11 +221,10 @@ EditorWindow::EditorWindow(BackendConfig config) : config_(std::move(config)) {
     layout->addWidget(preview_, 1);
     auto *properties = new QWidget;
     auto *propertyLayout = new QVBoxLayout(properties);
-    selection_ = new QLabel("Select an object to view its position.");
+    selection_ = new QLabel("No selection");
     selection_->setTextFormat(Qt::PlainText);
     selection_->setWordWrap(true);
     selection_->setAlignment(Qt::AlignTop | Qt::AlignLeft);
-    selection_->setMinimumHeight(70);
     propertyLayout->addWidget(selection_);
     auto *form = new QFormLayout;
     for (int axis = 0; axis < 3; ++axis) {
@@ -209,12 +237,32 @@ EditorWindow::EditorWindow(BackendConfig config) : config_(std::move(config)) {
                 [this, axis](double) { coordinateChanged_[axis] = true; });
         form->addRow(QString("XYZ").mid(axis, 1), coordinates_[axis]);
     }
+    for (int axis = 0; axis < 3; ++axis) {
+        rotations_[axis] = new QDoubleSpinBox;
+        rotations_[axis]->setObjectName(QString("rotation%1").arg(axis));
+        rotations_[axis]->setRange(-360, 360);
+        rotations_[axis]->setDecimals(3);
+        rotations_[axis]->setSuffix("°");
+        scales_[axis] = new QDoubleSpinBox;
+        scales_[axis]->setObjectName(QString("scale%1").arg(axis));
+        scales_[axis]->setRange(.01, 100);
+        scales_[axis]->setDecimals(4);
+        scales_[axis]->setSingleStep(.1);
+        scales_[axis]->setValue(1);
+        connect(rotations_[axis], qOverload<double>(&QDoubleSpinBox::valueChanged), this,
+                [this] { transformChanged_ = true; });
+        connect(scales_[axis], qOverload<double>(&QDoubleSpinBox::valueChanged), this,
+                [this] { transformChanged_ = true; });
+        form->addRow("Rotate " + QString("XYZ").mid(axis, 1), rotations_[axis]);
+        form->addRow("Scale " + QString("XYZ").mid(axis, 1), scales_[axis]);
+    }
     propertyLayout->addLayout(form);
-    apply_ = new QPushButton("Stage position change");
+    apply_ = new QPushButton("Apply transform");
     apply_->setObjectName("stagePosition");
-    undo_ = new QPushButton("Undo selected change");
+    undo_ = new QPushButton("Undo transform");
     undo_->setObjectName("undoSelected");
-    clear_ = new QPushButton("Clear all pending changes");
+    clear_ = new QPushButton("Clear edits");
+    clear_->setObjectName("clearPendingEdits");
     pending_ = new QLabel;
     pending_->setObjectName("pendingCount");
     propertyLayout->addWidget(apply_);
@@ -222,17 +270,27 @@ EditorWindow::EditorWindow(BackendConfig config) : config_(std::move(config)) {
     propertyLayout->addSpacing(15);
     propertyLayout->addWidget(pending_);
     propertyLayout->addWidget(clear_);
-    auto *collisionGroup = new QGroupBox("Actor collision · read-only");
+    auto *collisionGroup = new QGroupBox("Collision");
     auto *collisionLayout = new QVBoxLayout(collisionGroup);
-    collisionInspector_ = new QLabel("Select an actor to inspect its collision.");
+    collisionInspector_ = new QLabel("No selection");
     collisionInspector_->setObjectName("collisionInspector");
     collisionInspector_->setTextFormat(Qt::PlainText);
     collisionInspector_->setWordWrap(true);
     collisionInspector_->setAlignment(Qt::AlignTop | Qt::AlignLeft);
     collisionInspector_->setTextInteractionFlags(Qt::TextSelectableByMouse);
     collisionLayout->addWidget(collisionInspector_);
+    auto *collisionDetails = new QToolButton;
+    collisionDetails->setText("Collision");
+    collisionDetails->setCheckable(true);
+    collisionDetails->setArrowType(Qt::RightArrow);
+    collisionDetails->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    propertyLayout->addWidget(collisionDetails);
     propertyLayout->addWidget(collisionGroup);
-    propertyLayout->addWidget(notice);
+    collisionGroup->hide();
+    connect(collisionDetails, &QToolButton::toggled, this, [collisionGroup, collisionDetails](bool open) {
+        collisionGroup->setVisible(open);
+        collisionDetails->setArrowType(open ? Qt::DownArrow : Qt::RightArrow);
+    });
     propertyLayout->addStretch();
     propertyLayout->setSizeConstraint(QLayout::SetMinimumSize);
     auto *propertyScroll = new QScrollArea;
@@ -251,14 +309,30 @@ EditorWindow::EditorWindow(BackendConfig config) : config_(std::move(config)) {
     log_ = new QPlainTextEdit;
     log_->setReadOnly(true);
     log_->setMaximumBlockCount(300);
-    setCentralWidget(central);
+    workspace_ = new QMainWindow(this);
+    workspace_->setWindowFlags(Qt::Widget);
+    workspace_->setObjectName("viewportWorkspace");
+    workspace_->setDockOptions(AllowNestedDocks | AllowTabbedDocks);
+    workspace_->setTabPosition(Qt::AllDockWidgetAreas, QTabWidget::North);
+    workspace_->setMinimumSize(400, 300);
+    setCentralWidget(workspace_);
+    editorDock_ = new QDockWidget("Editor", workspace_);
+    editorDock_->setObjectName("editorViewportDock");
+    editorDock_->setWidget(central);
+    workspace_->addDockWidget(Qt::TopDockWidgetArea, editorDock_);
+    liveDock_ = new QDockWidget("Live", workspace_);
+    liveDock_->setObjectName("liveViewportDock");
+    clearLiveView();
+    workspace_->addDockWidget(Qt::TopDockWidgetArea, liveDock_);
+    workspace_->tabifyDockWidget(editorDock_, liveDock_);
+    editorDock_->raise();
     auto *objectPanel = new QWidget;
     auto *objectLayout = new QVBoxLayout(objectPanel);
     objectLayout->setContentsMargins(9, 9, 9, 9);
     objectLayout->addLayout(filters);
     objectLayout->addWidget(table_, 1);
     objectLayout->addLayout(pagination);
-    auto *objectsDock = new QDockWidget("SCENE OBJECTS", this);
+    auto *objectsDock = new QDockWidget("Objects", this);
     objectsDock->setObjectName("objectsDock");
     objectsDock->setWidget(objectPanel);
     addDockWidget(Qt::LeftDockWidgetArea, objectsDock);
@@ -279,15 +353,41 @@ EditorWindow::EditorWindow(BackendConfig config) : config_(std::move(config)) {
     tabs->addTab(propertyScroll, "Object");
     tabs->addTab(displayPanel, "Display");
     tabs->addTab(createLightingPanel(), "Lighting");
-    auto *inspectorDock = new QDockWidget("INSPECTOR", this);
+    auto *inspectorDock = new QDockWidget("Inspector", this);
     inspectorDock->setObjectName("inspectorDock");
     inspectorDock->setWidget(tabs);
     addDockWidget(Qt::RightDockWidgetArea, inspectorDock);
+    previewSettingsPanel_ = new PreviewSettingsPanel(previewProfilePath(), this);
+    previewSettingsDock_ = new QDockWidget("Preview settings", this);
+    previewSettingsDock_->setObjectName("previewSettingsDock");
+    previewSettingsDock_->setWidget(previewSettingsPanel_);
+    addDockWidget(Qt::RightDockWidgetArea, previewSettingsDock_);
+    tabifyDockWidget(inspectorDock, previewSettingsDock_);
+    previewSettingsDock_->hide();
+    portalDock_ = new QDockWidget("Portal", this);
+    portalDock_->setObjectName("portalControlsDock");
+    addDockWidget(Qt::RightDockWidgetArea, portalDock_);
+    tabifyDockWidget(inspectorDock, portalDock_);
+    portalDock_->hide();
+    previewSettingsPanel_->onClose = [this, inspectorDock] {
+        previewSettingsDock_->hide();
+        inspectorDock->raise();
+    };
+    previewSettingsPanel_->onSaved = [this, inspectorDock](const QString &path) {
+        previewSettingsDock_->hide();
+        inspectorDock->raise();
+        previewStatus_->setText("Profile saved");
+        previewStatus_->setToolTip(path);
+        previewStatus_->setProperty("state", "configured");
+        previewStatus_->setStyleSheet("color: #9eb8d8;");
+        previewStatus_->show();
+        log("Preview settings saved: " + path);
+    };
     auto *consolePanel = new QWidget;
     auto *consoleLayout = new QVBoxLayout(consolePanel);
     consoleLayout->addWidget(summary_);
     consoleLayout->addWidget(log_);
-    auto *consoleDock = new QDockWidget("OUTPUT / SOURCE DETAILS", this);
+    auto *consoleDock = new QDockWidget("Output", this);
     consoleDock->setObjectName("consoleDock");
     consoleDock->setWidget(consolePanel);
     addDockWidget(Qt::BottomDockWidgetArea, consoleDock);
@@ -297,26 +397,91 @@ EditorWindow::EditorWindow(BackendConfig config) : config_(std::move(config)) {
     connect(fileMenu->addAction("Open level…"), &QAction::triggered, open_, &QPushButton::click);
     connect(fileMenu->addAction("Load geometry…"), &QAction::triggered, geometry_, &QPushButton::click);
     connect(fileMenu->addAction("Build edited copy…"), &QAction::triggered, build_, &QPushButton::click);
+    auto *previewMenu = menuBar()->addMenu("Game");
+    previewSettings_ = previewMenu->addAction("Preview settings");
+    previewSettings_->setObjectName("previewSettingsAction");
+    connect(previewSettings_, &QAction::triggered, this, [this] { configurePreview(); });
+    auto *portal = previewMenu->addAction("Portal controls");
+    portal->setObjectName("portalControlsAction");
     fileMenu->addSeparator();
     connect(fileMenu->addAction("Close editor"), &QAction::triggered, this, &QWidget::close);
     auto *viewMenu = menuBar()->addMenu("View");
-    for (auto *dock : {objectsDock, inspectorDock, consoleDock})
+    for (auto *dock : {editorDock_, liveDock_, objectsDock, inspectorDock, consoleDock})
         viewMenu->addAction(dock->toggleViewAction());
+    auto *tabsAction = viewMenu->addAction("Tabbed views");
+    tabsAction->setObjectName("tabbedViewports");
+    connect(tabsAction, &QAction::triggered, this, [this] {
+        editorDock_->setFloating(false);
+        liveDock_->setFloating(false);
+        workspace_->addDockWidget(Qt::TopDockWidgetArea, editorDock_);
+        workspace_->addDockWidget(Qt::TopDockWidgetArea, liveDock_);
+        workspace_->tabifyDockWidget(editorDock_, liveDock_);
+        editorDock_->show();
+        liveDock_->show();
+        editorDock_->raise();
+    });
+    auto *splitAction = viewMenu->addAction("Side by side");
+    splitAction->setObjectName("splitViewports");
+    connect(splitAction, &QAction::triggered, this, [this] {
+        editorDock_->setFloating(false);
+        liveDock_->setFloating(false);
+        workspace_->addDockWidget(Qt::TopDockWidgetArea, editorDock_);
+        workspace_->splitDockWidget(editorDock_, liveDock_, Qt::Horizontal);
+        editorDock_->show();
+        liveDock_->show();
+        workspace_->resizeDocks({editorDock_, liveDock_}, {600, 600}, Qt::Horizontal);
+    });
     viewMenu->addSeparator();
-    connect(viewMenu->addAction("Reset panel layout"), &QAction::triggered, this,
-            [this, objectsDock, inspectorDock, consoleDock] {
-                objectsDock->setFloating(false);
-                inspectorDock->setFloating(false);
-                consoleDock->setFloating(false);
-                addDockWidget(Qt::LeftDockWidgetArea, objectsDock);
-                addDockWidget(Qt::RightDockWidgetArea, inspectorDock);
-                addDockWidget(Qt::BottomDockWidgetArea, consoleDock);
-                objectsDock->show();
-                inspectorDock->show();
-                consoleDock->hide();
-                resizeDocks({objectsDock, inspectorDock}, {300, 330}, Qt::Horizontal);
-            });
-    statusBar()->showMessage("Ready · original game files are never overwritten");
+    auto *resetLayout = viewMenu->addAction("Reset layout");
+    resetLayout->setObjectName("resetWorkspaceLayout");
+    connect(
+        resetLayout, &QAction::triggered, this, [this, objectsDock, inspectorDock, consoleDock, tabsAction] {
+            for (auto *dock : {objectsDock, inspectorDock, consoleDock, previewSettingsDock_, portalDock_})
+                dock->setFloating(false);
+            addDockWidget(Qt::LeftDockWidgetArea, objectsDock);
+            addDockWidget(Qt::RightDockWidgetArea, inspectorDock);
+            addDockWidget(Qt::BottomDockWidgetArea, consoleDock);
+            objectsDock->show();
+            inspectorDock->show();
+            consoleDock->hide();
+            addDockWidget(Qt::RightDockWidgetArea, previewSettingsDock_);
+            tabifyDockWidget(inspectorDock, previewSettingsDock_);
+            addDockWidget(Qt::RightDockWidgetArea, portalDock_);
+            tabifyDockWidget(inspectorDock, portalDock_);
+            previewSettingsDock_->hide();
+            portalDock_->hide();
+            tabsAction->trigger();
+            inspectorDock->raise();
+            resizeDocks({objectsDock, inspectorDock}, {300, 330}, Qt::Horizontal);
+        });
+    QSettings settings(QSettings::IniFormat, QSettings::UserScope, "SkylandersReverseEngineering",
+                       "LevelWorkshop");
+    const bool restoredLayout = restoreState(settings.value("workspace/layout-v3").toByteArray(), 3);
+    workspace_->restoreState(settings.value("workspace/views-v3").toByteArray(), 3);
+    if (!restoredLayout)
+        QTimer::singleShot(0, this, [this, objectsDock, inspectorDock] {
+            resizeDocks({objectsDock, inspectorDock}, {250, 280}, Qt::Horizontal);
+        });
+    // Restoring arrangement never opens auxiliary windows or starts a session.
+    for (auto *dock : findChildren<QDockWidget *>()) {
+        if (dock->isFloating())
+            dock->setFloating(false);
+        dock->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetClosable);
+    }
+    // Long selected names and diagnostic labels must not resize a viewport.
+    selection_->setMinimumWidth(0);
+    selection_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    for (auto *dock : {objectsDock, inspectorDock, portalDock_, previewSettingsDock_}) {
+        dock->setMinimumWidth(200);
+        dock->setMaximumWidth(520);
+        if (auto *content = dock->widget())
+            content->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    }
+    previewSettingsDock_->hide();
+    portalDock_->hide();
+    editorDock_->show();
+    editorDock_->raise();
+    statusBar()->showMessage("Ready");
 
     connect(open_, &QPushButton::clicked, this, [this] {
         const QString path = QFileDialog::getOpenFileName(
@@ -333,14 +498,11 @@ EditorWindow::EditorWindow(BackendConfig config) : config_(std::move(config)) {
             loadScene(false);
         }
     });
-    connect(portal, &QPushButton::clicked, this, [this] {
-        if (!portal_) {
-            portal_ = new PortalDialog(config_, this);
-            portal_->setAttribute(Qt::WA_DeleteOnClose);
-        }
+    connect(portal, &QAction::triggered, this, [this] {
+        ensurePortal();
+        portalDock_->show();
+        portalDock_->raise();
         portal_->show();
-        portal_->raise();
-        portal_->activateWindow();
     });
     connect(frameAll, &QPushButton::clicked, this, [this] { preview_->frameAll(); });
     connect(frameSelected, &QPushButton::clicked, this, [this] { preview_->frameSelection(); });
@@ -456,7 +618,7 @@ EditorWindow::EditorWindow(BackendConfig config) : config_(std::move(config)) {
         if (busy_ || !sceneObjects_.value(id).value("worldEditable").toBool())
             return;
         const QJsonArray moved{position.x(), position.y(), position.z()};
-        if (moved == sceneObjects_.value(id).value("position").toArray())
+        if (moved == sceneObjects_.value(id).value("position").toArray() && !transforms_.contains(id))
             edits_.remove(id);
         else
             edits_.insert(id, moved);
@@ -469,13 +631,13 @@ EditorWindow::EditorWindow(BackendConfig config) : config_(std::move(config)) {
         const QSignalBlocker blocker(table_);
         table_->clearSelection();
         updateSelection();
-        selection_->setText("Mesh inspection (read-only)\n" + name +
-                            "\n\nSelect an actor to edit its position. Mesh rebuilding is not implemented.");
+        selection_->setText(name + "\nRead-only mesh");
     };
     connect(apply_, &QPushButton::clicked, this, [this] { stagePosition(); });
     connect(undo_, &QPushButton::clicked, this, [this] {
         if (!selectedObject_.isEmpty()) {
             edits_.remove(selectedObject_.value("id").toInteger());
+            transforms_.remove(selectedObject_.value("id").toInteger());
             updatePending();
             refreshEditedObjects();
             updateSelection();
@@ -485,11 +647,13 @@ EditorWindow::EditorWindow(BackendConfig config) : config_(std::move(config)) {
         if (!canDiscard())
             return;
         edits_.clear();
+        transforms_.clear();
         updatePending();
         refreshEditedObjects();
         updateSelection();
     });
     connect(build_, &QPushButton::clicked, this, [this] { buildCopy(); });
+    connect(play_, &QPushButton::clicked, this, [this] { playCurrentMap(); });
     updatePending();
     setBusy(false);
     log("Backend: " + config_.script);
@@ -504,9 +668,8 @@ QWidget *EditorWindow::createLightingPanel() {
     layout->addWidget(heading);
     auto *notice = new QLabel("Live editor light rig. These controls change the preview only, never game "
                               "data. Native active lights, shadows and fog are not reconstructed yet.");
-    notice->setObjectName("mutedNotice");
-    notice->setWordWrap(true);
-    layout->addWidget(notice);
+    heading->setToolTip(notice->text());
+    delete notice;
     auto *preset = new QComboBox;
     preset->setObjectName("lightingPreset");
     preset->addItems({"Studio neutral", "Warm afternoon", "Cool evening"});
@@ -548,9 +711,8 @@ QWidget *EditorWindow::createLightingPanel() {
     layout->addWidget(reset);
     auto *hint = new QLabel(
         "Use Shading: material or flat to see lighting. Unlit / checker / missing intentionally bypass it.");
-    hint->setObjectName("mutedNotice");
-    hint->setWordWrap(true);
-    layout->addWidget(hint);
+    preset->setToolTip(hint->text());
+    delete hint;
     layout->addStretch();
     const auto apply = [this, azimuth, elevation, intensity, ambient, exposure, color, twoSided] {
         const double yaw = azimuth->value() / degrees, pitch = elevation->value() / degrees;
@@ -747,6 +909,10 @@ void EditorWindow::closeEvent(QCloseEvent *event) {
         }
         return;
     }
+    QSettings settings(QSettings::IniFormat, QSettings::UserScope, "SkylandersReverseEngineering",
+                       "LevelWorkshop");
+    settings.setValue("workspace/layout-v3", saveState(3));
+    settings.setValue("workspace/views-v3", workspace_->saveState(3));
     event->accept();
 }
 
@@ -762,11 +928,21 @@ void EditorWindow::setBusy(bool busy) {
     previous_->setEnabled(loaded && offset_ > 0);
     next_->setEnabled(loaded && nextOffset_ >= 0);
     build_->setEnabled(loaded && !edits_.isEmpty());
+    play_->setEnabled(loaded && !sourceSha256_.isEmpty());
+    previewSettings_->setEnabled(!busy);
+    previewSettingsPanel_->setEnabled(!busy);
     clear_->setEnabled(loaded && !edits_.isEmpty());
     table_->setEnabled(!busy);
     preview_->setEnabled(!busy);
     updateSelection();
     statusBar()->showMessage(busy ? "Working…" : "Ready");
+}
+
+bool EditorWindow::setInitialCamera(const QJsonObject &camera) {
+    if (!preview_->setCameraState(camera))
+        return false;
+    initialCamera_ = camera;
+    return true;
 }
 
 void EditorWindow::openPath(const QString &path, const QString &geometryPath) {
@@ -799,6 +975,7 @@ void EditorWindow::openPath(const QString &path, const QString &geometryPath) {
                 if (limitation.isString())
                     log(limitation.toString());
             edits_.clear();
+            transforms_.clear();
             updatePending();
             types_->clear();
             types_->addItem("All types", "");
@@ -819,8 +996,8 @@ void EditorWindow::openPath(const QString &path, const QString &geometryPath) {
                                   .arg(result.value.value("editableObjectCount").toInteger())
                                   .arg(result.value.value("sha256").toString()));
             if (authoredScene_)
-                summary_->setText(QString("%1\nAuthored scene · editor preview, not a playable game "
-                                          "chapter\n%2 objects · %3 editable\nSHA-256: %4")
+                summary_->setText(QString("%1\nAuthored scene · Play requires a configured native build "
+                                          "route\n%2 objects · %3 editable\nSHA-256: %4")
                                       .arg(path_)
                                       .arg(result.value.value("objectCount").toInteger())
                                       .arg(result.value.value("editableObjectCount").toInteger())
@@ -858,8 +1035,13 @@ void EditorWindow::loadScene(bool reloadObjects) {
             sceneObjects_.insert(object.value("id").toInteger(), object);
         }
         preview_->setScene(result.value);
+        if (!initialCamera_.isEmpty()) {
+            preview_->setCameraState(initialCamera_);
+            initialCamera_ = {};
+        }
         skyToggle_->setChecked(preview_->cameraState().value("skyVisible").toBool());
         preview_->setEdits(edits_);
+        preview_->setTransforms(transforms_);
         for (const auto &warning : result.value.value("warnings").toArray())
             if (warning.isString())
                 log(warning.toString());
@@ -882,10 +1064,27 @@ void EditorWindow::loadCollisions(bool reloadObjects) {
         return;
     if (authoredScene_) {
         collisions_.clear();
-        preview_->setCollisions({});
-        collisionState_ = "Authored preview: native game collision has not been built.";
+        QJsonArray boxes;
+        for (auto it = sceneObjects_.cbegin(); it != sceneObjects_.cend(); ++it) {
+            const auto o = it.value(), box = o.value("collision").toObject();
+            if (box.value("shape") != "box")
+                continue;
+            QJsonObject record{{"actorId", it.key()},
+                               {"collisionId", it.key()},
+                               {"editable", true},
+                               {"position", o.value("position")},
+                               {"rotationDegrees", o.value("rotationDegrees").toArray(QJsonArray{0, 0, 0})},
+                               {"scale", o.value("scale").toArray(QJsonArray{1, 1, 1})},
+                               {"dimensionsWorld", box.value("dimensions")},
+                               {"offsetWorld", box.value("offset")}};
+            collisions_[it.key()] = record;
+            boxes.append(record);
+        }
+        preview_->setCollisions(boxes);
+        collisionState_ = boxes.isEmpty() ? "No authored collision" : QString{};
         collisionSummary_->setText(collisionState_);
         collisionSummary_->setToolTip(collisionState_);
+        collisionToggle_->setEnabled(!boxes.isEmpty());
         if (reloadObjects)
             loadPage(0);
         return;
@@ -1007,6 +1206,10 @@ void EditorWindow::loadPage(int offset) {
                            .arg(offset_ + rows_.size())
                            .arg(result.value.value("total").toInteger()));
         setBusy(false);
+        if (autoPlay_) {
+            autoPlay_ = false;
+            QTimer::singleShot(0, this, [this] { playCurrentMap(); });
+        }
     });
 }
 
@@ -1030,7 +1233,19 @@ void EditorWindow::updateSelection() {
         if (editable)
             coordinates_[axis]->setValue(position.at(axis).toDouble());
         coordinateChanged_[axis] = false;
+        const auto t = transforms_.value(id, object);
+        const auto rotation = t.value("rotationDegrees").toArray(QJsonArray{0, 0, 0});
+        const auto scale = t.value("scale").toArray(QJsonArray{1, 1, 1});
+        const QSignalBlocker rb(rotations_[axis]), sb(scales_[axis]);
+        rotations_[axis]->setValue(rotation.at(axis).toDouble());
+        scales_[axis]->setValue(scale.at(axis).toDouble());
+        rotations_[axis]->setEnabled(!busy_ && editable && authoredScene_);
+        scales_[axis]->setEnabled(!busy_ && editable && authoredScene_);
+        rotations_[axis]->setToolTip(
+            authoredScene_ ? "Native Euler angles; collision follows on Play"
+                           : "Native actor transform support has not been verified for this object");
     }
+    transformChanged_ = false;
     apply_->setEnabled(!busy_ && editable);
     undo_->setEnabled(!busy_ && selected && edits_.contains(id));
     preview_->setSelected(selected ? id : -1);
@@ -1056,7 +1271,13 @@ void EditorWindow::updateSelection() {
                                 " placeholder · fixed world size\n" +
                                 spatial.value("proxyReason").toString());
     }
-    selection_->setToolTip(spatial.value("proxyReason").toString());
+    selection_->setToolTip(selection_->text() + "\n" + spatial.value("proxyReason").toString());
+    selection_->setText(!selected
+                            ? "No selection"
+                            : QString("%1\n#%2 · %3")
+                                  .arg(object.value("name").toString())
+                                  .arg(id)
+                                  .arg(editable ? (authoredScene_ ? "Transform" : "Position") : "Read-only"));
     const auto collision = collisions_.value(id);
     if (!collisionState_.isEmpty())
         collisionInspector_->setText(collisionState_);
@@ -1083,6 +1304,17 @@ void EditorWindow::updateSelection() {
             return parts.join(", ");
         };
         const auto initial = edits_.contains(id) ? edits_.value(id) : collision.value("position").toArray();
+        if (authoredScene_) {
+            const auto transform = transforms_.value(id, collision);
+            collisionInspector_->setText(QString("BOX · local size (m): %1\nRotation (°): %2\nScale: %3")
+                                             .arg(format(collision.value("dimensionsWorld").toArray()),
+                                                  format(transform.value("rotationDegrees").toArray()),
+                                                  format(transform.value("scale").toArray())));
+            collisionInspector_->setToolTip(
+                "Play exports this box with the object's position, rotation and scale. Holes and concavities "
+                "are filled; this is not mesh collision.");
+            return;
+        }
         collisionInspector_->setText(
             QString("Eligible nominal BOX #%1\nW / H / L (m): %2\nLocal offset (m): %3\nActor base (m): "
                     "%4\nActor yaw: %5°\n%6\nRead-only; scripts and bevels are not shown.")
@@ -1117,6 +1349,7 @@ void EditorWindow::refreshEditedObjects() {
             }
     }
     preview_->setEdits(edits_);
+    preview_->setTransforms(transforms_);
 }
 
 void EditorWindow::updatePending() {
@@ -1138,7 +1371,19 @@ void EditorWindow::stagePosition() {
     for (int axis = 0; axis < 3; ++axis)
         if (coordinateChanged_[axis])
             position[axis] = coordinates_[axis]->value();
-    if (position == object.value("position").toArray())
+    if (authoredScene_ && transformChanged_) {
+        QJsonArray rotation, scale;
+        for (int a = 0; a < 3; ++a) {
+            rotation.append(rotations_[a]->value());
+            scale.append(scales_[a]->value());
+        }
+        if (rotation == object.value("rotationDegrees").toArray(QJsonArray{0, 0, 0}) &&
+            scale == object.value("scale").toArray(QJsonArray{1, 1, 1}))
+            transforms_.remove(id);
+        else
+            transforms_[id] = {{"rotationDegrees", rotation}, {"scale", scale}};
+    }
+    if (position == object.value("position").toArray() && !transforms_.contains(id))
         edits_.remove(id);
     else
         edits_.insert(id, position);
@@ -1168,8 +1413,12 @@ void EditorWindow::buildCopy() {
         return;
     }
     QJsonArray edits;
-    for (auto it = edits_.begin(); it != edits_.end(); ++it)
-        edits.append(QJsonObject{{"objectId", it.key()}, {"position", it.value()}});
+    for (auto it = edits_.begin(); it != edits_.end(); ++it) {
+        auto e = transforms_.value(it.key());
+        e["objectId"] = it.key();
+        e["position"] = it.value();
+        edits.append(e);
+    }
     setBusy(true);
     log("Building " + output);
     callBackendAsync(
@@ -1197,4 +1446,301 @@ void EditorWindow::buildCopy() {
                                  "in a separate game copy.");
             statusBar()->showMessage("Build complete; pending edits retained for additional exports.");
         });
+}
+
+void EditorWindow::previewError(const QString &message) {
+    if (auto *label = liveDock_->findChild<QLabel *>("preparationStage"))
+        label->setText("Preparation failed");
+    if (auto *bar = liveDock_->findChild<QProgressBar *>())
+        bar->setRange(0, 1);
+    previewStatus_->setText("Preview failed · see Output");
+    previewStatus_->setToolTip(message);
+    previewStatus_->setProperty("state", "error");
+    previewStatus_->setStyleSheet("color: #f0bd78;");
+    previewStatus_->show();
+    log("Preview error: " + message);
+    statusBar()->showMessage("Preview not started");
+}
+
+void EditorWindow::importGlb() {
+    if (busy_)
+        return;
+    const auto source = QFileDialog::getOpenFileName(this, "Import static model", {}, "Binary glTF (*.glb)");
+    if (source.isEmpty())
+        return;
+    if (!path_.isEmpty() && !authoredScene_ &&
+        QMessageBox::question(this, "New model workshop",
+                              "Import into a new playable workshop? Adding models directly to this native "
+                              "chapter is not supported yet.") != QMessageBox::Yes)
+        return;
+    const auto output = QFileDialog::getSaveFileName(
+        this, "Save imported workshop", QFileInfo(source).absolutePath() + "/model-workshop.scene.json",
+        "Workshop (*.scene.json)", nullptr, QFileDialog::DontConfirmOverwrite);
+    if (output.isEmpty())
+        return;
+    if (QFileInfo::exists(output)) {
+        QMessageBox::warning(this, "Choose a new file", "The output already exists.");
+        return;
+    }
+    if (transformChanged_ || coordinateChanged_[0] || coordinateChanged_[1] || coordinateChanged_[2])
+        stagePosition();
+    QJsonObject request{{"path", source}, {"output", output}};
+    if (authoredScene_) {
+        QJsonArray edits;
+        for (auto it = edits_.cbegin(); it != edits_.cend(); ++it) {
+            auto e = transforms_.value(it.key());
+            e["objectId"] = it.key();
+            e["position"] = it.value();
+            edits.append(e);
+        }
+        request["basePath"] = path_;
+        request["expectedSha256"] = sourceSha256_;
+        request["edits"] = edits;
+    }
+    setBusy(true);
+    statusBar()->showMessage("Importing model and creating collision…");
+    callBackendAsync(this, {config_.node, QFileInfo(config_.script).absoluteDir().filePath("glb_import.mjs")},
+                     request, [this](BackendResult result) {
+                         setBusy(false);
+                         if (!result.ok()) {
+                             log(result.error);
+                             QMessageBox::warning(this, "Import failed", result.error);
+                             return;
+                         }
+                         for (const auto &w : result.value.value("warnings").toArray())
+                             log(w.toString());
+                         edits_.clear();
+                         transforms_.clear();
+                         openPath(result.value.value("output").toString());
+                         if (!result.value.value("materialConversions").toArray().isEmpty())
+                             statusBar()->showMessage(
+                                 "Imported · transparency approximated as opaque; see Output", 15000);
+                     });
+}
+
+void EditorWindow::showPreparation(const QString &stage) {
+    auto *label = liveDock_->findChild<QLabel *>("preparationStage");
+    if (!label) {
+        // Keep an existing live widget owned by PortalDialog until shutdown.
+        if (auto *old = liveDock_->widget()) {
+            old->hide();
+            old->setParent(portal_ ? static_cast<QWidget *>(portal_) : this);
+            if (!qobject_cast<QDialog *>(old))
+                old->deleteLater();
+        }
+        auto *panel = new QWidget;
+        auto *layout = new QVBoxLayout(panel);
+        layout->addStretch();
+        label = new QLabel;
+        label->setObjectName("preparationStage");
+        label->setAlignment(Qt::AlignCenter);
+        layout->addWidget(label);
+        auto *bar = new QProgressBar;
+        bar->setObjectName("preparationProgress");
+        bar->setRange(0, 0);
+        bar->setMaximumWidth(360);
+        layout->addWidget(bar, 0, Qt::AlignCenter);
+        auto *stop = new QPushButton("Stop");
+        stop->setObjectName("preparationStop");
+        connect(stop, &QPushButton::clicked, this, [this] { stopPreview(); });
+        layout->addWidget(stop, 0, Qt::AlignCenter);
+        layout->addStretch();
+        liveDock_->setWidget(panel);
+    }
+    label->setText(stage);
+    liveDock_->show();
+    liveDock_->raise();
+}
+
+void EditorWindow::stopPreview() {
+    cancelPreview_ = true;
+    stopPreview_->setEnabled(false);
+    if (auto *label = liveDock_->findChild<QLabel *>("preparationStage"))
+        label->setText("Cancelled · finishing current file operation");
+    if (auto *bar = liveDock_->findChild<QProgressBar *>())
+        bar->setRange(0, 1);
+    previewStatus_->setText("Stopped");
+    previewStatus_->setProperty("state", "stopped");
+    if (portal_) {
+        const bool preparing = busy_;
+        if (!preparing)
+            setBusy(true);
+        const auto previous = portal_;
+        portal_.clear();
+        const QPointer<EditorWindow> guard(this);
+        previous->requestShutdown([guard, preparing] {
+            if (guard)
+                QTimer::singleShot(0, guard, [guard, preparing] {
+                    if (guard) {
+                        guard->clearLiveView();
+                        if (!preparing)
+                            guard->setBusy(false);
+                    }
+                });
+        });
+    } else if (!busy_)
+        clearLiveView();
+}
+
+void EditorWindow::configurePreview() {
+    if (busy_)
+        return;
+    previewSettingsPanel_->setProfilePath(previewProfilePath());
+    previewSettingsDock_->show();
+    previewSettingsDock_->raise();
+}
+
+void EditorWindow::clearLiveView() {
+    if (auto *previous = liveDock_->widget()) {
+        previous->hide();
+        previous->deleteLater();
+    }
+    auto *empty = new QLabel("No game running", liveDock_);
+    empty->setAlignment(Qt::AlignCenter);
+    empty->setObjectName("liveEmptyState");
+    liveDock_->setWidget(empty);
+}
+
+void EditorWindow::ensurePortal() {
+    if (portal_)
+        return;
+    portal_ = new PortalDialog(config_, this);
+    portal_->setWindowFlags(Qt::Widget);
+    portal_->setAttribute(Qt::WA_DeleteOnClose);
+    portalDock_->setWidget(portal_);
+    const QPointer<PortalDialog> owner = portal_;
+    portal_->hostNativeView = [this, owner](NativeGameView *view) {
+        if (!owner || portal_ != owner)
+            return;
+        view->requestStop = [this] { stopPreview(); };
+        if (liveDock_->widget() != view) {
+            if (auto *old = liveDock_->widget()) {
+                old->hide();
+                old->deleteLater();
+            }
+            view->setParent(liveDock_, Qt::Widget);
+            liveDock_->setWidget(view);
+        }
+        liveDock_->show();
+        liveDock_->raise();
+        view->show();
+    };
+}
+
+void EditorWindow::playCurrentMap() {
+    if (busy_ || path_.isEmpty())
+        return;
+    if (previewProfilePath().isEmpty()) {
+        configurePreview();
+        return;
+    }
+    const auto profile = readPreviewProfile(previewProfilePath());
+    if (!profile.ok()) {
+        configurePreview();
+        previewError(profile.error);
+        return;
+    }
+    // A typed coordinate may not yet have reached the Stage button. Playing the
+    // current document includes those visible changes, as well as gizmo edits.
+    if (transformChanged_ || coordinateChanged_[0] || coordinateChanged_[1] || coordinateChanged_[2])
+        stagePosition();
+    const auto levelPath = path_, sourceSha256 = sourceSha256_;
+    const auto pendingEdits = edits_;
+    const auto pendingTransforms = transforms_;
+    const auto request =
+        previewLaunchRequest(profile, levelPath, sourceSha256, pendingEdits, pendingTransforms);
+    if (!request.ok()) {
+        previewError(request.error);
+        return;
+    }
+    setBusy(true);
+    cancelPreview_ = false;
+    stopPreview_->setEnabled(true);
+    showPreparation("Preparing current map…");
+    previewStatus_->setStyleSheet("color: #9eb8d8;");
+    previewStatus_->setToolTip({});
+    previewStatus_->show();
+    const auto prepare = [this, profile, levelPath, sourceSha256, pendingEdits, pendingTransforms] {
+        previewStatus_->setText(QString("Preparing · %1 edit(s)").arg(pendingEdits.size()));
+        previewStatus_->setProperty("state", "preparing");
+        log("Preparing private game preview: " + levelPath);
+        preparePreviewLaunchAsync(
+            this, config_, profile, levelPath, sourceSha256, pendingEdits,
+            [this, levelPath, sourceSha256, pendingEdits, pendingTransforms](BackendResult result) {
+                setBusy(false);
+                if (cancelPreview_) {
+                    clearLiveView();
+                    return;
+                }
+                if (!result.diagnostics.isEmpty())
+                    log(result.diagnostics);
+                if (!result.ok()) {
+                    previewError(result.error);
+                    return;
+                }
+                if (path_ != levelPath || sourceSha256_ != sourceSha256 || edits_ != pendingEdits ||
+                    transforms_ != pendingTransforms) {
+                    previewError("The current document changed while preparing the preview. Nothing was "
+                                 "launched; try again.");
+                    return;
+                }
+                const auto launch = [this, result] {
+                    if (cancelPreview_) {
+                        setBusy(false);
+                        return;
+                    }
+                    const bool created = !portal_;
+                    ensurePortal();
+                    const auto map = result.value.value("map").toObject();
+                    const auto label = map.value("label").toString(map.value("loadString").toString());
+                    const auto launchedPortal = portal_;
+                    portal_->onLaunchFailed = [this, launchedPortal](const QString &error) {
+                        if (portal_ == launchedPortal)
+                            previewError(error);
+                    };
+                    portal_->onLaunched = [this, launchedPortal, label] {
+                        if (portal_ != launchedPortal)
+                            return;
+                        previewStatus_->setText("Preview · " + label);
+                        previewStatus_->setProperty("state", "running");
+                    };
+                    QString error;
+                    if (!portal_->applyLaunchSettings(result.value, true, true, &error)) {
+                        setBusy(false);
+                        if (created)
+                            portal_->close();
+                        previewError(error.isEmpty() ? "The portal cannot start this prepared session."
+                                                     : error);
+                        return;
+                    }
+                    previewStatus_->setText("Opening · " + label);
+                    previewStatus_->setProperty("state", "starting");
+                    previewStatus_->setStyleSheet("color: #9eb8d8;");
+                    log("Prepared map: " + map.value("loadString").toString() + " · " +
+                        result.value.value("game").toString());
+                    setBusy(false);
+                };
+                if (portal_) {
+                    setBusy(true);
+                    showPreparation("Stopping previous session…");
+                    const auto previous = portal_;
+                    portal_.clear();
+                    const QPointer<EditorWindow> guard(this);
+                    previous->requestShutdown([guard, launch] {
+                        if (guard)
+                            QTimer::singleShot(0, guard, [guard, launch] {
+                                if (guard)
+                                    launch();
+                            });
+                    });
+                } else
+                    launch();
+            },
+            pendingTransforms,
+            [this](const QString &stage) {
+                if (!cancelPreview_)
+                    showPreparation(stage);
+            });
+    };
+    prepare();
 }

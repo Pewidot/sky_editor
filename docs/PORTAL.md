@@ -31,8 +31,10 @@ It does not download figure dumps, game files, keys, or firmware.
   rejected. These guards avoid unsafe edge cases in upstream's raw IPC handler.
 - Swaps send removal, wait 750 ms, then insert. This is a practical status-report
   allowance, not a guaranteed game acknowledgment.
-- The controller does not patch game memory, bypass encrypted PKG protection, or
-  implement portal-speaker playback. Upstream's OUT endpoint currently just logs
+- Normal portal/input/capture operations do not patch game memory. The opt-in
+  experimental camera below changes only allowlisted camera/viewer data in its
+  own child, temporarily. No operation patches game executables, bypasses encrypted
+  PKG protection, or implements portal-speaker playback. Upstream's OUT endpoint currently just logs
   receipt; firmware/version responses are not proof of working speaker audio.
 
 ## Start the MCP server
@@ -46,6 +48,8 @@ separate from the level editor's C++ MCP server. No automatic global configurati
 change is made. Tools are `portal_start`, `portal_status`, `portal_create_figure`,
 `portal_insert`, `portal_remove`, `portal_swap`, `portal_checkpoint`, `portal_stop`,
 `portal_input`, `portal_capture`, `portal_sequence`, and `portal_cancel_sequence`.
+Experimental native-camera tools are `portal_camera_enable`, `portal_camera_move`,
+`portal_camera_ui`, `portal_camera_disable`, and `portal_camera_status`.
 Input/capture/sequence require the documented local input-IPC fork; all original
 tools still work with the official v0.19 binary.
 
@@ -227,6 +231,100 @@ started Story. Recovery via pause → Main Menu → Yes worked without restartin
 the emulator. Therefore **fresh is not the same as settled**: at animated state
 boundaries allow the transition to finish and inspect a new frame before
 deciding on the next action. Do not infer ignored input from one outgoing frame.
+
+## Native game view and experimental free camera
+
+From the repository root:
+
+```bash
+./editor/build/skylanders-level-editor --renderer gpu
+```
+
+Use **Play** with the [saved preview profile](GAME_PREVIEW.md) to launch the
+current supported map directly into the main window's **Live** tab. **Game →
+Portal controls** opens an integrated side panel for manual configuration.
+The Live pane hosts the actual owned SDL/Vulkan X11 window, with no PNG loop.
+An explicit PNG fallback is available under its Settings; that mode remains
+snapshots with at least one second between completed automatic captures.
+
+The stable configuration tested in this workspace is:
+
+| Field | Path relative to this workspace unless absolute |
+| --- | --- |
+| Emulator | `tools/vendor/shadps4/input-ipc/shadps4` |
+| Game | `/home/peridot/.local/share/skylanders-editor/sungarden-01/CUSA00697/eboot.bin` |
+| Resume checkpoint | `builds/checkpoint-sunbreak-identity-01` |
+| Session | A **new**, uniquely named directory under `builds/` |
+
+Enter absolute paths in the dialog. Other users supply their own legally obtained
+extracted game and matching local emulator build. No game or save payload is
+distributed. A checkpoint contains a copied save/profile, not emulator RAM, so
+this stable setup still passes through normal startup. Fast-start experiments
+are separate. Wait until an actual map has loaded; USB readiness is not gameplay.
+
+1. Toggle **Free camera**, then click the viewport to focus it.
+2. Use **WASD**, **Q/E** down/up, and **right-mouse drag** to look. Inputs stay local
+   to that focused image; mouse changes are coalesced, diagonals normalized, and
+   only one camera request is outstanding. No global keyboard capture is used.
+3. **Hide HUD** switches the native sprite pass. It may also hide menus,
+   interaction prompts and other sprite overlays, not just health.
+4. **Esc**, toggling Free camera off, closing the view, loss of the watchdog
+   heartbeat, and stopping the owned emulator restore the camera and UI flag.
+   Switching workspace tabs keeps the hold; movement stops when focus leaves.
+   The game simulation continues while the camera is held.
+
+The native view matrix supplies the starting pose; its projection is retained.
+Movement is elapsed-time paced/coalesced at 33 ms; PNG updates are separate and
+slower. **Speed** sets 0.1–100 game units per second, persisted as
+`nativeCamera/speed` in the editor settings. There is no cumulative distance
+tether. Individual transactions remain bounded to 5 units and 45 degrees;
+`portal_camera_status.maximumTravel` is `null` (unbounded), not 50.
+The GUI renews an 8-second watchdog every 2 seconds, allowing a
+hold until manually disabled. MCP leases accept 1–30 seconds and can be renewed
+with `portal_camera_renew` without changing the original restoration state. Native
+coordinates have not been calibrated as metres. No camera collision avoidance,
+distant-region streaming, or complete shadow/reflection coverage is guaranteed.
+
+Automatic captures share a **30-image batch**. After Restore and all pending work
+complete, click **New capture batch** to authorize another bounded batch in the
+same running emulator. Reopening the window does not reset the limit. Existing
+PNGs remain archived; the view never deletes or overwrites them. Slow captures
+postpone work instead of building an input or screenshot backlog.
+
+Exact supported SHA-256 identities:
+
+- Game `eboot.bin`: `bd5c0433860287599824adb3660964ae623c0505c1300e86cd17e65d5315d3bd`.
+- Analysis ELF: `423a45131ebed98d1ed74edfe94d4946ee6a71f8bcc21631f2aba745ee95f1c3`.
+- Input-IPC emulator: `67256a057061d3175f307143a150001cfce468d97879d1c836c203eebd10c345`.
+
+Only the controller's direct child is accessible. Process lifetime, mapped memory,
+native bindings, vtables and updater bytes are checked. Short process pauses end
+with resume in cleanup; the first Academy proof measured 13–18 ms pauses. The
+camera's original update is held by an object-local vtable change, not an executable
+patch. Only allowlisted camera pose fields and one validated viewer Boolean can
+be written; pointers are resolved again for every write. Failed safe restoration
+stops the owned emulator instead of leaving an indefinite hold. Camera control
+does not alter game archives, original saves or executables; ordinary gameplay can
+still update the isolated profile.
+
+MCP examples after starting the owned session and loading a map:
+
+```json
+{"name":"portal_camera_enable","arguments":{"durationMs":15000,"hideUi":false}}
+{"name":"portal_camera_move","arguments":{"right":1,"forward":1,"yaw":-5}}
+{"name":"portal_camera_ui","arguments":{"hidden":true}}
+{"name":"portal_capture","arguments":{}}
+{"name":"portal_camera_disable","arguments":{}}
+```
+
+`portal_camera_status` and `portal_status.nativeCamera` report the remaining lease
+and bounds. `available` means validation can be attempted; `validated` means the
+source-bound checks passed. The initial live backend proof is retained privately
+in `research/native-camera-proof-02.json`: the moved native view remained fixed
+while the character walked, then the restored camera followed the player. This
+is distinct from the C++ window integration test. Synthetic tests cover input
+coalescing, scope, batching, serialization and cleanup; they do not alone prove
+HUD rendering or unrestricted free flight.
 
 ## Save a checkpoint and resume faster
 

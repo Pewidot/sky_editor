@@ -18,14 +18,14 @@ unchanged for comparison. Never distribute either profile or the supplied save.
 
 ## Resume the local tested checkpoint in the GUI
 
-Start the editor as described in [README](../README.md#build-and-open-a-map),
-then choose **Virtual portal…**. Supply your own paths for these fields:
+Start the editor as described in [README](../README.md#editor-starten--dieser-bereits-eingerichtete-rechner),
+then choose **Virtual portal…**. Use these three existing local paths:
 
 | Dialog field | Local value |
 | --- | --- |
-| shadPS4 executable | `/path/to/shadps4` |
-| Prepared game eboot | `/path/to/runtime-game/CUSA00697/eboot.bin` |
-| Resume checkpoint | `/path/to/your-checkpoint` |
+| shadPS4 executable | `/mnt/nas/Dokumente/skylanders_reverse_engineer/tools/vendor/shadps4/Shadps4-sdl.AppImage` |
+| Prepared game eboot | `/mnt/nas/Dokumente/skylanders_reverse_engineer/builds/runtime-baseline/CUSA00697/eboot.bin` |
+| Resume checkpoint | `/mnt/nas/Dokumente/skylanders_reverse_engineer/builds/checkpoint-first-level-01` |
 
 Set **New session directory** to a **new, nonexistent** directory under an
 existing parent, for example a fresh name inside this workspace's `builds/`.
@@ -41,9 +41,9 @@ previous runs. Do not copy a running save directory by hand.
 
 The tested route and controller API are in [PORTAL.md](PORTAL.md#save-a-checkpoint-and-resume-faster);
 the runtime limitations are in [RUNTIME_TESTING.md](RUNTIME_TESTING.md).
-Local evidence is `builds/checkpoint-first-level-01/checkpoint.json`,
+Local evidence is the [checkpoint manifest](../builds/checkpoint-first-level-01/checkpoint.json),
 created on 2026-10-13, and its
-`user/home/1000/savedata/CUSA00697/SAVEDATA00` directory.
+[saved-data directory](../builds/checkpoint-first-level-01/user/home/1000/savedata/CUSA00697/SAVEDATA00).
 These private paths exist only on the research machine and are **not** source
 release contents. Other people must create checkpoints from their own game.
 

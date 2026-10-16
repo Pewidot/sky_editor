@@ -2,6 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
+import { validateTransform, createRebase } from './object_transform.mjs';
 
 export const AUTHORED_SCENE_SCHEMA = 'skylanders-authored-scene-v1';
 export const AUTHORED_SCENE_PROFILE = 'authored-preview-v1';
@@ -25,7 +26,7 @@ const flags = {
 };
 const limitations = [
   'Authored editor preview document, not an IGZ resource or playable game chapter.',
-  'Build changes only explicit root translations and their world-baked mesh positions; no game files are written.',
+  'Build changes explicit root transforms and world-baked positions/normals; no game files are written by this JSON backend.',
   'Geometry, lighting and material provenance are author-supplied, not evidence of runtime compatibility.',
   'No collision, scripts, navigation, chapter registration, resource linking or gameplay validation is created.',
 ];
@@ -158,7 +159,17 @@ export function validateAuthoredScene(document) {
       'Actor editability must describe the same explicit root',
     );
     if (object.bounds !== undefined) bounds(object.bounds, 'actor bounds');
-    if (object.rotationDegrees !== undefined) vec3(object.rotationDegrees, 'actor rotation');
+    validateTransform(object);
+    if (object.collision !== undefined) {
+      const c = object.collision;
+      check(c?.shape === 'box', 'Only box collision supported');
+      vec3(c.dimensions, 'collision dimensions', 10000);
+      vec3(c.offset, 'collision offset', 10000);
+      check(
+        c.dimensions.every((v) => v >= 0.01),
+        'Collision dimensions must be positive',
+      );
+    }
   }
   const textures = document.textures ?? [];
   check(Array.isArray(textures) && textures.length <= 256, 'Invalid authored texture inventory');
@@ -313,10 +324,11 @@ function unrelated(document, changedIds) {
   delete value.contentBounds;
   for (const object of value.objects)
     if (changedIds.has(object.id))
-      for (const key of ['position', 'worldPosition', 'bounds']) delete object[key];
+      for (const key of ['position', 'worldPosition', 'bounds', 'rotationDegrees', 'scale'])
+        delete object[key];
   for (const mesh of value.meshes)
     if (changedIds.has(mesh.actorId))
-      for (const key of ['positions', 'actorBasePosition', 'bounds']) delete mesh[key];
+      for (const key of ['positions', 'normals', 'actorBasePosition', 'bounds']) delete mesh[key];
   return JSON.stringify(value);
 }
 export function buildAuthoredScene(bytes, { expectedSha256, edits }) {
@@ -338,8 +350,8 @@ export function buildAuthoredScene(bytes, { expectedSha256, edits }) {
       edit &&
         typeof edit === 'object' &&
         !Array.isArray(edit) &&
-        Object.keys(edit).every((k) => ['objectId', 'position'].includes(k)),
-      'Only objectId/position edits are supported',
+        Object.keys(edit).every((k) => ['objectId', 'position', 'rotationDegrees', 'scale'].includes(k)),
+      'Unsupported transform field',
     );
     integer(edit.objectId, 0, Number.MAX_SAFE_INTEGER, 'objectId');
     check(!seen.has(edit.objectId), 'Duplicate actor edit');
@@ -347,30 +359,54 @@ export function buildAuthoredScene(bytes, { expectedSha256, edits }) {
     vec3(edit.position, 'edited position');
     const object = byId.get(edit.objectId);
     check(object?.editable && object.worldEditable, 'Object is not an editable authored root');
-    if (equal3(object.position, edit.position)) continue;
+    const oldTransform = validateTransform(object),
+      newTransform = validateTransform({ ...oldTransform, ...edit });
+    if (
+      equal3(object.position, edit.position) &&
+      equal3(oldTransform.rotationDegrees, newTransform.rotationDegrees) &&
+      equal3(oldTransform.scale, newTransform.scale)
+    )
+      continue;
     const before = [...object.position],
       delta = edit.position.map((n, i) => n - before[i]),
       movedMeshes = [];
+    const from = { position: before, ...oldTransform },
+      to = { position: edit.position, ...newTransform };
+    const rebase = createRebase(from, to);
     object.position = [...edit.position];
     object.worldPosition = [...edit.position];
-    if (object.bounds)
-      object.bounds = {
-        min: object.bounds.min.map((n, i) => n + delta[i]),
-        max: object.bounds.max.map((n, i) => n + delta[i]),
-      };
+    if (edit.rotationDegrees) object.rotationDegrees = [...newTransform.rotationDegrees];
+    if (edit.scale) object.scale = [...newTransform.scale];
+    const translationOnly =
+      equal3(oldTransform.rotationDegrees, newTransform.rotationDegrees) &&
+      equal3(oldTransform.scale, newTransform.scale);
     for (const mesh of document.meshes)
       if (mesh.actorId === object.id) {
-        mesh.positions = mesh.positions.map((n, i) => n + delta[i % 3]);
+        if (translationOnly) mesh.positions = mesh.positions.map((n, i) => n + delta[i % 3]);
+        else {
+          for (let i = 0; i < mesh.positions.length; i += 3) {
+            const p = rebase.point(mesh.positions.slice(i, i + 3));
+            for (let a = 0; a < 3; a++) mesh.positions[i + a] = p[a];
+          }
+          if (mesh.normals)
+            for (let i = 0; i < mesh.normals.length; i += 3) {
+              const n = rebase.normal(mesh.normals.slice(i, i + 3));
+              for (let a = 0; a < 3; a++) mesh.normals[i + a] = n[a];
+            }
+        }
         mesh.actorBasePosition = [...edit.position];
         mesh.bounds = meshBounds(mesh.positions);
         movedMeshes.push(mesh.selectionKey);
       }
+    if (object.bounds) object.bounds = aggregate(document.meshes.filter((m) => m.actorId === object.id));
     changes.push({
       objectId: object.id,
       name: object.name,
       before,
       after: [...edit.position],
       delta,
+      beforeTransform: oldTransform,
+      afterTransform: newTransform,
       translatedMeshes: movedMeshes,
     });
   }
@@ -401,7 +437,8 @@ export function buildAuthoredScene(bytes, { expectedSha256, edits }) {
         unrelatedJsonDataPreserved: true,
         provenancePreserved: true,
         staticMeshesPreserved: true,
-        normalsUvsMaterialsPreserved: true,
+        uvsMaterialsPreserved: true,
+        normalsRebasedByInverseTranspose: true,
         gameRuntimeTested: false,
         semanticJsonPreservationNotByteOffsets: true,
       },
@@ -450,6 +487,15 @@ export function runAuthoredSceneRequest(request) {
       check(request.expectedSha256 === digest, 'Source SHA-256 does not match expectedSha256');
     const loaded = parseAuthoredScene(bytes),
       document = loaded.document;
+    // Recipe metadata for old, immutable Gallardo documents. Never write it
+    // back during inspection or alter the source hash/build reproducibility.
+    const objectsForEditor = document.objects.map((o) =>
+      o.id === 1 &&
+      !o.collision &&
+      document.provenance?.shapeSha256 === '18a67907117904a604280021e193ec41544830e5d2f032bb1bb17d9a1b9bb204'
+        ? { ...o, collision: { shape: 'box', dimensions: [2, 1.15, 4.4], offset: [0, 0, 0] } }
+        : o,
+    );
     const unchanged = () =>
       check(
         same(stat, fs.fstatSync(fd)) &&
@@ -479,7 +525,7 @@ export function runAuthoredSceneRequest(request) {
       if (request.type !== undefined) check(typeof request.type === 'string', 'type must be a string');
       if (request.query !== undefined) check(typeof request.query === 'string', 'query must be a string');
       const query = (request.query ?? '').toLowerCase(),
-        objects = document.objects.filter(
+        objects = objectsForEditor.filter(
           (o) =>
             (!request.type || o.type === request.type) &&
             `${o.id} ${o.name} ${o.type}`.toLowerCase().includes(query),
@@ -541,7 +587,7 @@ export function runAuthoredSceneRequest(request) {
       return {
         ...document,
         ...base,
-        objects: document.objects,
+        objects: objectsForEditor,
         objectCount: document.objects.length,
         worldObjectCount: document.objects.length,
         unresolvedParentCount: 0,

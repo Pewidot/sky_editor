@@ -43,6 +43,29 @@ test(
     const result = extractMetadata(executable),
       classes = new Map(result.classes.map((d) => [d.name, d]));
     const expected = {
+      tfbViewerParameters: { _drawSpriteScene: 0x50, _sortTexture: 0xc, _cameras: 0x20, _disables: 0x48 },
+      tfbRenderContextSystem: {
+        _rc: 0x20,
+        _mainCamera: 0x28,
+        _spriteCamera: 0x30,
+        _toolCamera: 0x38,
+        _renderEnabled: 0xc,
+        _vizMask: 0x10,
+        _renderFrame: 0x18,
+      },
+      igRenderCamera: {
+        _up: 0x18,
+        _lookAtPos: 0x24,
+        _pos: 0x30,
+        _fov: 0x3c,
+        _aspect: 0x40,
+        _near: 0x64,
+        _far: 0x68,
+        _viewMatrix: 0x80,
+        _projectionMatrix: 0xc0,
+      },
+      tfbRenderCamera: { _skydomeViewMatrix: 0x110, _skydomeProjectionMatrix: 0x150 },
+      tfbToolCamera: { _enabled: 0x190 },
       ScriptStructure: { _interface: 0, _fieldList: 0x30, _varContentsType: 0x38, _unTyped: 0 },
       ScriptSet: { _list: 0x30 },
       ValueRHSVariant: {
@@ -229,7 +252,7 @@ test(
       tfbRuntimeMaterial: { _materialList: 0x28, _instanceAttrs: 0x40, _transforms: 0x48 },
       tfbTextureBindAttr: { _alphaTexture: 0x28, _data: 0x30 },
     };
-    assert.equal(classes.size, 74);
+    assert.equal(classes.size, 79);
     assert.equal(result.relativeRelocations, 114973);
     assert.equal(classes.get('ScriptStructure').size, 0x40);
     assert.equal(classes.get('ScriptSet').size, 0x38);

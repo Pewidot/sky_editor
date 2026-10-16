@@ -50,6 +50,14 @@ function makeGeometryGraph({ sky = false } = {}) {
   ptr(vb.offset + 0x28, fmt.offset);
   buffer.writeUInt32LE(3, vb.offset + 0xc);
   buffer.writeUInt32LE(3, ib.offset + 0xc);
+  for (const [b, at] of [
+    [vb, 0x980],
+    [ib, 0x984],
+  ]) {
+    buffer.writeUInt32LE(4, b.offset + 0x10);
+    ptr(b.offset + 0x18, at);
+    buffer.writeUInt32LE(3, at);
+  }
   buffer.writeUInt32LE(3, vb.offset + 0x30);
   buffer.writeUInt32LE(3, ib.offset + 0x30);
   buffer.writeUInt32LE(16, fmt.offset + 0xc);
@@ -233,6 +241,16 @@ test('exports a static indexed triangle using the declared position element offs
   assert.deepEqual(result.contentBounds, result.bounds);
   assert.equal(result.meshes[0].source.positionOffset, 4);
   assert.deepEqual(fixture.buffer, original);
+});
+
+test('rejects stale stream counts after a scalar-only buffer resize', () => {
+  for (const at of [0x980, 0x984]) {
+    const z = makeGeometryGraph();
+    z.buffer.writeUInt32LE(2, at);
+    const result = loadGeometry(z);
+    assert.equal(result.meshes.length, 0);
+    assert.match(result.warnings.join('\n'), /scalar and stream counts disagree/);
+  }
 });
 
 test('keeps sky geometry separate from the playable-scene framing bounds', () => {

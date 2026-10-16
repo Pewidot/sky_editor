@@ -2,9 +2,11 @@
 
 #include "backend.h"
 #include <QDialog>
+#include <QElapsedTimer>
 #include <QImage>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QPointer>
 #include <QProcess>
 #include <QSet>
 #include <QTimer>
@@ -18,6 +20,7 @@ class QPlainTextEdit;
 class QPushButton;
 class QSpinBox;
 class QTableWidget;
+class NativeGameView;
 
 class PortalDialog : public QDialog {
   public:
@@ -25,6 +28,11 @@ class PortalDialog : public QDialog {
                           const QString &controllerOverride = {});
     ~PortalDialog() override;
     bool controllerRunning() const { return process_.state() != QProcess::NotRunning; }
+    bool applyLaunchSettings(const QJsonObject &settings, bool startAfterReady, bool openNativeView,
+                             QString *error = nullptr);
+    std::function<void(const QString &)> onLaunchFailed;
+    std::function<void()> onLaunched;
+    std::function<void(NativeGameView *)> hostNativeView;
     void requestShutdown(std::function<void()> complete = {});
 
   protected:
@@ -39,12 +47,23 @@ class PortalDialog : public QDialog {
     QTimer timeout_;
     QByteArray buffer_;
     qint64 sequence_ = 0, pendingId_ = 0;
+    QString pendingOperation_;
+    bool stopQueued_ = false;
     bool ready_ = false, emulatorRunning_ = false, usbReady_ = false, launched_ = false;
     bool closing_ = false, stopAttempted_ = false, resetAfterExit_ = false;
     bool inputSupported_ = false, captureSupported_ = false, inputUncertain_ = false,
          captureUncertain_ = false;
     bool inputProtocolFault_ = false, captureProtocolFault_ = false;
     qint64 lastCaptureRequestId_ = 0;
+    QElapsedTimer captureLatency_;
+    qint64 lastCaptureLatencyMs_ = 0;
+    QPointer<NativeGameView> nativeView_;
+    bool nativeCameraAvailable_ = false, nativeCameraHeld_ = false, cameraRestoreQueued_ = false;
+    bool nativeUiHidden_ = false;
+    qint64 emulatorPid_ = 0;
+    bool launchWhenReady_ = false, openNativeAfterLaunch_ = false;
+    int nativeCameraRemainingMs_ = 0;
+    QString nativeCameraMessage_;
     QImage frame_;
     QSet<QString> seenFramePaths_;
     QJsonArray slots_;
@@ -79,9 +98,11 @@ class PortalDialog : public QDialog {
     QLabel *frameInfo_;
     QLineEdit *capturePath_;
     QPushButton *capture_;
+    QPushButton *openNativeView_;
     std::vector<QPushButton *> gameButtons_;
 
     void startController();
+    void launchOwnedSession();
     void send(const QString &operation, const QJsonObject &arguments = {},
               std::function<void(QJsonObject, QString)> complete = {});
     void readOutput();
@@ -90,7 +111,11 @@ class PortalDialog : public QDialog {
     void updateControls();
     void log(const QString &message);
     void sendInput(const QString &kind, const QString &name);
-    void captureFrame();
+    bool captureFrame();
+    void openNativeView();
+    bool requestNativeCamera(const QString &operation, const QJsonObject &arguments);
+    void requestNativeCameraRestore();
+    void applyNativeCameraState(const QJsonObject &state);
     void clearFrame(const QString &message);
     bool showFrame(const QJsonObject &result, QString &error);
     void resizeFrame();

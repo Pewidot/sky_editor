@@ -1,5 +1,17 @@
 # Chapter-selection UI draft
 
+Update2026-10-14: the identity-corrected UI plus two narrow policies was tested
+with the [native sandbox](NATIVE_DEMO.md). Adventure18 is selectable without
+faking completion. The demo's empty objective sets no longer display earned
+gold stars: `research/clear-demo-ui-stars-01.mjs` inserts an exact-ID check and
+zeros four local star results, leaving save fields and other chapters alone.
+The original Soda Springs entry retains its completed gold stars. The runtime
+capture is `runtime-native-gallardo-04` screenshot000004; the installed UI archive
+hash is `07d5fadb2e21f65b07f0db86301a28235832fb20643cba4e4f41521fbdb3746e`.
+Five containing branch spans grow by5. The shared macro interface ending exactly
+at the insertion boundary is deliberately unchanged so its continuation enters
+the new check. The older draft mechanics follow.
+
 This narrow CUSA00697 tool extends a supported original UI payload, not arbitrary
 game revisions. Original inner UI SHA-256 is
 `bf0879a08c951f5b2e44bdd81c0b5cebbfe9b79bdd8bbe3d3bde666d64b65f6a`.

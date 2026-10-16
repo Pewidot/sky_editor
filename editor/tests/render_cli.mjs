@@ -121,6 +121,18 @@ try {
     return result;
   };
   const camera = { pivot: [0, 0, -25], yawRadians: 0, pitchRadians: -0.7, distance: 60 };
+  for (const extra of [
+    ['fixture', '--camera-json', '{}'],
+    ['--camera-json', JSON.stringify(camera)],
+    ['--mcp', 'fixture', '--camera-json', JSON.stringify(camera)],
+  ]) {
+    const bad = spawnSync(binary, ['--backend', backend, ...extra, '--smoke-test'], {
+      encoding: 'utf8',
+      timeout: 10000,
+      env: { ...process.env, QT_QPA_PLATFORM: 'offscreen' },
+    });
+    assert.equal(bad.status, 2, bad.stderr);
+  }
   const check = diagnostic('checker', [
     '--mesh-key',
     'geometry:0',

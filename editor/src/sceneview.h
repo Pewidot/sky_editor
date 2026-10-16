@@ -30,6 +30,7 @@ class SceneView : public QWidget {
     QJsonArray placeholderReport() const;
     void setScene(const QJsonObject &scene);
     void setEdits(const QMap<qint64, QJsonArray> &edits);
+    void setTransforms(const QMap<qint64, QJsonObject> &transforms);
     void setSelected(qint64 id);
     void setGridSpacing(double spacing);
     void setSnap(bool enabled);
@@ -104,6 +105,7 @@ class SceneView : public QWidget {
         QJsonObject metadata;
         std::vector<QVector3D> vertices;
         std::vector<QVector3D> normals;
+        std::vector<QVector3D> originalVertices, originalNormals;
         std::vector<int> indices;
         QRgb color;
         bool sky = false;
@@ -120,9 +122,9 @@ class SceneView : public QWidget {
     };
     struct CollisionBox {
         qint64 actorId;
-        QVector3D position, offset, dimensions;
-        float yaw;
+        QVector3D position, offset, dimensions, rotation, scale;
     };
+    QMap<qint64, QJsonObject> sourceTransforms_, transforms_;
     std::vector<Actor> actors_;
     std::vector<Mesh> meshes_;
     std::vector<QImage> textures_;

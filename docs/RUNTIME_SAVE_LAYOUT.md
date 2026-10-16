@@ -75,7 +75,7 @@ The null serialized field and the populated runtime field are therefore compatib
 
 ## Runtime observations and remaining limits
 
-The separate runtime capture `research/runtime-save-layout-baseline-01.json` records an owned-child, read-only traversal with repeated reads (not an atomic snapshot). It reports the six parameter member labels `limit to val`, `fields total`, `num bits`, `bit index`, `signed`, and `header param`, and 39 slot / 18 header parameters. These labels are script-level object names, **not six extra native C++ fields on ScriptStructure**. This note independently corroborates the native offsets, not the live capture's synchronization or every parameter's value.
+The separate main-agent capture `research/runtime-save-layout-baseline-01.json` records an owned-child, read-only traversal with repeated reads (not an atomic snapshot). It reports the six parameter member labels `limit to val`, `fields total`, `num bits`, `bit index`, `signed`, and `header param`, and 39 slot / 18 header parameters. These labels are script-level object names, **not six extra native C++ fields on ScriptStructure**. This note independently corroborates the native offsets, not the live capture's synchronization or every parameter's value.
 
 The baseline's reported 7999 used slot bits and 2995 used header bits are observations to reconcile with the existing 1000-byte / 376-byte payloads. They are not a general payload-size formula: alignment, reserved capacity, schema versioning, encryption, checksums, and container framing require separate evidence. A chapter-count change must be validated against its newly captured schema before a save migration is attempted.
 

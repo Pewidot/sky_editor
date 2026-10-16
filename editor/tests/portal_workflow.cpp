@@ -1,3 +1,4 @@
+#include "nativegameview.h"
 #include "portaldialog.h"
 
 #include <QApplication>
@@ -36,6 +37,11 @@ int main(int argc, char **argv) {
     dialog.findChild<QSpinBox *>("portalFigureId")->setValue(123);
     auto *table = dialog.findChild<QTableWidget *>("portalSlots");
     auto button = [&](const char *name) { return dialog.findChild<QPushButton *>(name); };
+    button("portalNativeView")->click();
+    auto *native = static_cast<NativeGameView *>(dialog.findChild<QDialog *>("nativeGameView"));
+    if (!native || !native->isWindow() || native->isModal() || !native->isVisible() ||
+        !native->findChild<QLabel *>("nativeViewNotice")->text().contains("Experimental native camera"))
+        return 1;
     int phase = 0;
     QElapsedTimer elapsed;
     elapsed.start();
@@ -50,7 +56,8 @@ int main(int argc, char **argv) {
             phase++;
             button("portalStart")->click();
         } else if (phase == 1 && button("portalCreate")->isEnabled()) {
-            if (button("portalCross")->isEnabled() || button("portalCapture")->isEnabled()) {
+            if (button("portalCross")->isEnabled() || button("portalCapture")->isEnabled() ||
+                native->findChild<QPushButton *>("nativeViewCapture")->isEnabled()) {
                 std::fprintf(stderr, "Game tools were enabled for official binary\n");
                 app.exit(1);
                 return;
@@ -123,14 +130,26 @@ int main(int argc, char **argv) {
                 app.exit(1);
                 return;
             }
+            native->findChild<QSpinBox *>("nativeViewFrameLimit")->setValue(1);
             phase++;
-            button("portalCapture")->click();
+            native->findChild<QPushButton *>("nativeViewStart")->click();
         } else if (phase == 12 && button("portalCapture")->isEnabled() &&
                    !dialog.findChild<QLineEdit *>("portalCapturePath")->text().isEmpty()) {
             auto *preview = dialog.findChild<QLabel *>("portalFramePreview");
             if (preview->pixmap().isNull() ||
                 !dialog.findChild<QLabel *>("portalFrameInfo")->text().contains("not live")) {
                 std::fprintf(stderr, "Fresh PNG preview missing/not labeled\n");
+                app.exit(1);
+                return;
+            }
+            if (native->automaticCaptureCount() != 1 || native->refreshing() ||
+                native->findChild<QLabel *>("nativeViewImage")->pixmap().isNull() ||
+                native->findChild<QLineEdit *>("nativeViewPath")->text() !=
+                    dialog.findChild<QLineEdit *>("portalCapturePath")->text() ||
+                !native->findChild<QLabel *>("nativeViewMetadata")
+                     ->text()
+                     .contains("Capture + transfer + verification:")) {
+                std::fprintf(stderr, "Detached native view did not receive verified frame/path/latency\n");
                 app.exit(1);
                 return;
             }
@@ -154,7 +173,9 @@ int main(int argc, char **argv) {
                    dialog.findChild<QLabel *>("portalGameFeedback")->text().contains("CAPTURE_TIMEOUT")) {
             if (button("portalCapture")->isEnabled() ||
                 !dialog.findChild<QLineEdit *>("portalCapturePath")->text().isEmpty() ||
-                !dialog.findChild<QLabel *>("portalFramePreview")->pixmap().isNull()) {
+                !dialog.findChild<QLabel *>("portalFramePreview")->pixmap().isNull() ||
+                !native->findChild<QLabel *>("nativeViewImage")->pixmap().isNull() ||
+                native->findChild<QPushButton *>("nativeViewStart")->isEnabled()) {
                 std::fprintf(stderr, "Timed-out capture showed stale image or permitted retry\n");
                 app.exit(1);
                 return;
@@ -180,8 +201,8 @@ int main(int argc, char **argv) {
             poll.stop();
             button("portalCross")->click();
             dialog.requestShutdown([&] {
-                if (dialog.controllerRunning()) {
-                    std::fprintf(stderr, "Controller survived portal shutdown\n");
+                if (dialog.controllerRunning() || native->isVisible() || native->refreshing()) {
+                    std::fprintf(stderr, "Controller/native view survived portal shutdown\n");
                     app.exit(1);
                     return;
                 }

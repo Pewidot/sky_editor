@@ -1,6 +1,8 @@
 #include "mcp.h"
 #include "sceneview.h"
 
+#include <QDir>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QRegularExpression>
@@ -38,6 +40,10 @@ QJsonArray toolsList() {
                            {"maxItems", 3},
                            {"items", QJsonObject{{"type", "number"}, {"minimum", low}, {"maximum", high}}}};
     };
+    auto transformProperties = coordinate.value("properties").toObject();
+    transformProperties["rotationDegrees"] = vec3(-360, 360);
+    transformProperties["scale"] = vec3(.01, 100);
+    coordinate["properties"] = transformProperties;
     const auto lightingSchema =
         schema({{"direction", vec3(-1e4, 1e4)},
                 {"ambient", vec3(0, 4)},
@@ -52,6 +58,24 @@ QJsonArray toolsList() {
     const QJsonObject textureSize{{"type", "integer"}, {"minimum", 32}, {"maximum", 1024}};
     const QJsonObject objectId{{"type", "integer"}, {"minimum", 0}};
     return {
+        QJsonObject{
+            {"name", "import_glb"},
+            {"description", "Import static embedded glTF 2.0 as a new workshop scene, with native-exportable "
+                            "BOX collision. Does not launch/install. PNG/JPEG need ImageMagick."},
+            {"inputSchema",
+             schema(
+                 {{"path", path},
+                  {"output", field("string", "NEW absolute .scene.json path")},
+                  {"basePath", field("string", "Optional existing authored scene")},
+                  {"expectedSha256", digest},
+                  {"alphaPolicy", QJsonObject{{"type", "string"},
+                                              {"enum", QJsonArray{"opaque", "reject"}},
+                                              {"default", "opaque"},
+                                              {"description", "Approximate actual transparency as opaque, "
+                                                              "with warnings; reject forbids that loss."}}}},
+                 {"path", "output"})},
+            {"annotations",
+             QJsonObject{{"readOnlyHint", false}, {"destructiveHint", false}, {"openWorldHint", false}}}},
         QJsonObject{{"name", "inspect_level"},
                     {"description", "Read level metadata and object type counts. Does not modify the file."},
                     {"inputSchema", schema({{"path", path}, {"expectedSha256", digest}}, {"path"})},
@@ -86,11 +110,11 @@ QJsonArray toolsList() {
                                {"description", "Include vertex/index arrays; can produce a large response. "
                                                "False returns mesh metadata and counts."}}},
                   {"includeTextures",
-                   QJsonObject{{"type", "boolean"},
-                               {"default", false},
-                               {"description",
-                                "Include deduplicated RGBA color-map previews and mesh UVs; requires "
-                                "includeGeometry:true. Unsupported layered materials stay flat."}}},
+                   QJsonObject{
+                       {"type", "boolean"},
+                       {"default", false},
+                       {"description", "Include deduplicated RGBA color-map previews and mesh UVs; requires "
+                                       "includeGeometry:true. Unsupported layered materials stay flat."}}},
                   {"texturePreviewSize",
                    QJsonObject{
                        {"type", "integer"},
@@ -223,7 +247,20 @@ QString validate(const QString &name, const QJsonObject &arguments) {
                                                       .match(arguments.value("expectedSha256").toString())
                                                       .hasMatch()))
         return "expectedSha256 must contain exactly 64 lowercase hexadecimal characters.";
-    if (name == "list_level_objects") {
+    if (name == "import_glb") {
+        allowed << "output" << "basePath" << "alphaPolicy";
+        if (arguments.contains("alphaPolicy") &&
+            !QStringList{"opaque", "reject"}.contains(arguments.value("alphaPolicy").toString()))
+            return "alphaPolicy must be opaque or reject";
+        for (const auto *key : {"path", "output"})
+            if (!arguments.value(key).isString() || !QDir::isAbsolutePath(arguments.value(key).toString()))
+                return "Import requires absolute paths";
+        if (arguments.contains("basePath") &&
+            (!arguments.value("basePath").isString() ||
+             !QDir::isAbsolutePath(arguments.value("basePath").toString()) ||
+             !arguments.contains("expectedSha256")))
+            return "basePath requires an absolute path and matching SHA-256";
+    } else if (name == "list_level_objects") {
         allowed << "type" << "query" << "offset" << "limit";
         for (const auto &key : {QStringLiteral("type"), QStringLiteral("query")})
             if (arguments.contains(key) && !arguments.value(key).isString())
@@ -346,8 +383,20 @@ QString validate(const QString &name, const QJsonObject &arguments) {
             for (const auto &value : edit.value("position").toArray())
                 if (!value.isDouble() || !std::isfinite(value.toDouble()))
                     return "Position coordinates must be finite numbers.";
-            if (edit.size() != 2)
-                return "An edit may only contain objectId and position.";
+            for (auto it = edit.begin(); it != edit.end(); ++it)
+                if (!QStringList{"objectId", "position", "rotationDegrees", "scale"}.contains(it.key()))
+                    return "Unknown transform field";
+            for (const auto *key : {"rotationDegrees", "scale"})
+                if (edit.contains(key)) {
+                    const auto a = edit.value(key).toArray();
+                    if (!edit.value(key).isArray() || a.size() != 3)
+                        return "Transform requires three numbers";
+                    for (const auto &v : a)
+                        if (!v.isDouble() || !std::isfinite(v.toDouble()) ||
+                            v.toDouble() < (QString(key) == "scale" ? .01 : -360) ||
+                            v.toDouble() > (QString(key) == "scale" ? 100 : 360))
+                            return "Transform outside supported range";
+                }
         }
     }
     for (auto it = arguments.begin(); it != arguments.end(); ++it)
@@ -451,6 +500,8 @@ int runMcp(const BackendConfig &config) {
                 operation = "materials";
             else if (name == "render_level_view")
                 operation = "render";
+            else if (name == "import_glb")
+                operation = "import";
             else {
                 send(errorResponse(id, -32602, "Unknown tool: " + name));
                 continue;
@@ -471,9 +522,13 @@ int runMcp(const BackendConfig &config) {
             const bool collision = name == "inspect_level_collision";
             if (collision && arguments.contains("expectedSha256"))
                 arguments.insert("expectedSourceHash", arguments.take("expectedSha256"));
-            const auto result = operation == "render"
-                                    ? renderLevelView(config, arguments)
-                                    : callBackend(collision ? collisionBackend(config) : config, arguments);
+            BackendConfig selected = collision ? collisionBackend(config) : config;
+            if (operation == "import") {
+                selected.script = QFileInfo(config.script).absoluteDir().filePath("glb_import.mjs");
+                arguments.remove("operation");
+            }
+            const auto result =
+                operation == "render" ? renderLevelView(config, arguments) : callBackend(selected, arguments);
             if (!result.diagnostics.isEmpty())
                 std::cerr << result.diagnostics.toStdString() << '\n';
             send(resultResponse(id, toolResult(result.value, result.error)));

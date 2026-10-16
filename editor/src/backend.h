@@ -22,4 +22,5 @@ BackendResult callBackend(const BackendConfig &config, const QJsonObject &reques
 BackendResult renderLevelView(const BackendConfig &config, const QJsonObject &request);
 BackendConfig collisionBackend(const BackendConfig &config);
 void callBackendAsync(QObject *owner, const BackendConfig &config, const QJsonObject &request,
-                      std::function<void(BackendResult)> finished);
+                      std::function<void(BackendResult)> finished,
+                      std::function<void(QString)> progress = {});
