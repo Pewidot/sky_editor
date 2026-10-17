@@ -4,6 +4,13 @@ The independently written editor and analysis tools are licensed under MIT.
 That license does not cover game assets, model assets, SDKs, emulator code or
 other third-party material.
 
+## Documentation screenshots
+
+`docs/screenshots/` contains editor and in-game captures using locally supplied
+game and vehicle assets. They document the tools' output; the MIT license
+does not apply to the depicted third-party artwork, models or trademarks.
+No reusable model, texture archive or game data accompanies these images.
+
 ## shadPS4 patches
 
 `tools/patches/shadps4-input-ipc.patch` and

@@ -11,6 +11,18 @@ import { gzipSync } from 'node:zlib';
 const DEFAULT_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const PREFIX = 'skylanders-level-editor-source';
 export const REQUIRED_SOURCE_FILES = Object.freeze([
+  'tools/igz_types.mjs',
+  'tools/native_sunbreak_mission.mjs',
+  'tools/native_sunbreak_world.mjs',
+  'tools/sunbreak_build.mjs',
+  'tools/sunbreak_objectives_ui.mjs',
+  'tools/sunbreak_progress_ui.mjs',
+  'tests/igz_types.test.mjs',
+  'tests/native_sunbreak_mission.test.mjs',
+  'tests/native_sunbreak_world.test.mjs',
+  'tests/sunbreak_build.test.mjs',
+  'tests/sunbreak_objectives_ui.test.mjs',
+  'tests/sunbreak_progress_ui.test.mjs',
   'tools/iga_extract.cpp',
   'tools/iga_inspect.mjs',
   'tools/iga_replace.mjs',
@@ -188,6 +200,8 @@ export const OPTIONAL_SOURCE_FILES = Object.freeze([
   'package.json',
   'package-lock.json',
   'docs/REVERSE_ENGINEERING.md',
+  'docs/SCRIPT_EXAMPLE.md',
+  'docs/SCREENSHOTS.md',
   'README.md',
   'LICENSE',
   'LICENSE.md',
